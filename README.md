@@ -3,6 +3,8 @@
 MiniMax H3 多卡加载与显存调度节点。目标不是提供一条固定工作流，而是把 H3 的模型加载、Turbo LoRA、步数、时长、分辨率、GPU 模式和 Video VAE 调度收进一个统一入口，方便接入任意 H3 工作流。
 
 > 当前版本：v0.20.0-rc1
+>
+> `main` 分支已加入 H3VM Core 通用 MODEL 接口预览；公开节点数量不变。
 
 ## 作者 / Author
 
@@ -70,6 +72,36 @@ MiniMax H3 多卡加载与显存调度节点。目标不是提供一条固定工
 
 加载器会根据 LoRA 家族选择对应 sampler 语义，并统一处理 12 / 3 video-audio sigma shift。步数统一提供 4 / 6 / 8 三档；若权重有更严格的步数契约，会在运行时提示或锁定。
 
+## H3VM Core 通用 MODEL 接口（main 预览）
+
+项目现在拆成两层，但普通用户的使用方式不变：
+
+- **H3VM Core**：`MODEL → H3VM execution → MODEL`，只负责 GPU 模式、双卡调度、显存驻留和 telemetry。
+- **H3VM Master Loader**：继续保留模型、Turbo LoRA、步数、时长、分辨率、Seed、Prompt 等一体化功能。
+
+Master Loader 现在会在运行时桥接到同一套 Core 模式策略，因此整合版和后续高级接口不会各维护一套 `SINGLE_GPU / DUAL_QUIET / DUAL_CAPACITY` 参数。
+
+高级工作流可使用内部 API：
+
+`h3vm.core_adapter.adapt_model(model, config=H3VMCoreConfig(...))`
+
+当前首版支持：
+
+- clean MiniMax H3 `MODEL`
+- 标准 ComfyUI `ModelPatcher` weight patches
+- 常见 `LoraLoaderModelOnly` 这类权重补丁路径
+
+当前会明确拒绝：
+
+- runtime injections
+- object patches
+- hook patches
+- weight-wrapper patches
+
+这是故意 fail-closed。以上机制可能直接绑定模块对象，如果没有为 GPU1 helper 精确重映射，虽然“能跑”，主副卡算的可能已经不是同一套模型。Larry injection/bypass Turbo 在 Master Loader 内仍继续使用现有已验证的 H3VM 专用兼容路径，不受这个限制。
+
+通用 Core 内部使用 ComfyUI 自带的 `deepclone_multigpu()` 生成独立模型副本，再把标准 weight-patch 状态镜像到 H3VM block/helper patcher。后续研究重点是补齐 device-aware injection remap，而不是用静默降级换“兼容”。
+
 ## 安装
 
 1. 将 `ComfyUI-H3-MultiGPU` 文件夹放入 `ComfyUI/custom_nodes/`。
@@ -115,6 +147,7 @@ Capacity 档位测试建议先跑：
 - `DUAL_QUIET`：当前日常推荐
 - `DUAL_CAPACITY`：可用但仍属于实验性容量模式，尤其欢迎不同显存组合与高分辨率测试
 - `DUAL_SYNC_ACCEL`：接口已预留，后端待接入
+- `H3VM Core prebuilt MODEL`：weight-patch 路径进入 main 预览，injection remap 继续开发
 
 项目不会把“GPU1 更忙”当作加速成功。性能模式以 wall time / 主卡关键路径为准；Capacity 模式则以“单卡 OOM、双卡能完成”为主要成功标准。
 
