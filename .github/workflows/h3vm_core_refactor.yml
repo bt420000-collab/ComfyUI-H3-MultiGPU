@@ -1,0 +1,47 @@
+name: H3VM Core Refactor
+
+on:
+  push:
+    paths:
+      - '.h3vm_core_refactor.ready'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refactor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply Core refactor
+        run: python .h3vm_core_refactor.py
+
+      - name: Static compile
+        run: |
+          python -m py_compile __init__.py h3vm/core_adapter.py h3vm/loader.py h3vm/master_console.py
+          python tests/test_core_adapter_contract.py
+
+      - name: Verify public contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'from .h3vm.core_adapter import H3VMCoreConfig, build_asset_model' __init__.py
+          grep -q '_prebuilt_patcher=None' h3vm/loader.py
+          grep -q 'model_source' h3vm/loader.py
+          grep -q 'v0.21.0-rc1' README.md
+
+      - name: Commit refactor and clean one-shot files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .h3vm_core_refactor.py .h3vm_core_refactor.ready .github/workflows/h3vm_core_refactor.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Refactor H3VM into shared MODEL execution core"
+          git push
