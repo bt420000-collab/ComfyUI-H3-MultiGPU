@@ -1,0 +1,26 @@
+name: H3VM Core CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile lightweight modules
+        run: |
+          python -m py_compile h3vm/__init__.py h3vm/core_adapter.py h3vm/master_console.py
+      - name: Run Core contract tests
+        run: |
+          python tests/test_core_adapter_contract.py
