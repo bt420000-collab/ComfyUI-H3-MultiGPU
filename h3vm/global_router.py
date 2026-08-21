@@ -24,9 +24,15 @@ def _tensor_nbytes(value):
 
 
 class H3GlobalSpanRouter:
-    """H3 block-span router backed by GlobalMemorySpace."""
+    """H3 block-span router backed by GlobalMemorySpace.
 
-    def __init__(self, primary_device, secondary_device, block_map, first, last, *, space, secondary_prefetch=True, telemetry=True):
+    H3 sees a logical tensor. GPU0/GPU1 are compute blocks that acquire a fresh
+    replica when they need one. The transport backend is hidden behind the
+    GlobalMemorySpace and can be direct or explicitly host-neutral.
+    """
+
+    def __init__(self, primary_device, secondary_device, block_map, first, last, *,
+                 space, secondary_prefetch=True, telemetry=True):
         self.primary_device = primary_device
         self.secondary_device = secondary_device
         self.block_map = block_map
@@ -69,7 +75,10 @@ class H3GlobalSpanRouter:
             queue = [self.block_map[i] for i in range(self.first, self.last + 1)]
             out = comfy.model_prefetch.make_prefetch_queue(queue, self.secondary_device, opts)
             if not self._prefetch_logged:
-                LOG.info("H3VM Dev7 secondary private prefetch | requested=on active=%s blocks=%d", out is not None, len(queue))
+                LOG.info(
+                    "H3VM Dev7 secondary private prefetch | requested=on active=%s blocks=%d",
+                    out is not None, len(queue),
+                )
                 self._prefetch_logged = True
             return out
         except Exception as e:
@@ -95,8 +104,16 @@ class H3GlobalSpanRouter:
         self._primary_gap_ms = ((now - self._last_span_end) * 1000.0) if self._last_span_end is not None else None
         self._span_started = now
         self._in_stats0 = self._stats_snapshot(self.space.transport.stats)
-        self._h = self.space.adopt(h, name=f"h3.activation.step{self._span_count+1}", ram_backing=self.space.transport.selected_mode == "neutral_pageable")
-        h2 = self._h.acquire(self.secondary_device, prefer_neutral=self.space.transport.selected_mode == "neutral_pageable")
+
+        self._h = self.space.adopt(
+            h,
+            name=f"h3.activation.step{self._span_count+1}",
+            ram_backing=self.space.transport.selected_mode == "neutral_pageable",
+        )
+        h2 = self._h.acquire(
+            self.secondary_device,
+            prefer_neutral=self.space.transport.selected_mode == "neutral_pageable",
+        )
         self._t_emb = self.space.readonly_tree(t_emb, self.secondary_device)
         self._segments = self.space.readonly_tree(mod_segments, self.secondary_device)
         self._rope = self.space.readonly_tree(rope_freqs, self.secondary_device)
@@ -107,29 +124,41 @@ class H3GlobalSpanRouter:
     def execute(self, index, h, t_emb, mod_segments, rope_freqs, transformer_options=None):
         import comfy.model_management
         import comfy.model_prefetch
+
         if index == self.first or self._h is None:
             h = self._begin(h, t_emb, mod_segments, rope_freqs, transformer_options)
         elif getattr(h, "device", None) != self.secondary_device:
+            # This should be rare. Re-publish into the logical object instead of
+            # exposing a device-to-device ownership assumption to the block code.
             self._h.publish(h)
             h = self._h.acquire(self.secondary_device)
+
         block = self.block_map[index]
         try:
             with comfy.model_management.cuda_device_context(self.secondary_device):
                 if self._prefetch_queue is not None:
                     comfy.model_prefetch.prefetch_queue_pop(self._prefetch_queue, self.secondary_device, block)
-                h = block(h, self._t_emb, self._segments, self._rope, transformer_options=transformer_options or {})
+                h = block(h, self._t_emb, self._segments, self._rope,
+                          transformer_options=transformer_options or {})
+
             if index == self.first or index == self.last or ((index - self.first) % 4 == 0):
                 self._sample_memory()
+
             if index == self.last:
                 if self._prefetch_queue is not None:
                     comfy.model_prefetch.prefetch_queue_pop(self._prefetch_queue, self.secondary_device, None)
+
                 self._h.publish(h, device=self.secondary_device)
-                h = self._h.acquire(self.primary_device, prefer_neutral=self.space.transport.selected_mode == "neutral_pageable")
+                h = self._h.acquire(
+                    self.primary_device,
+                    prefer_neutral=self.space.transport.selected_mode == "neutral_pageable",
+                )
                 span_end = time.perf_counter()
                 span_ms = (span_end - self._span_started) * 1000.0 if self._span_started else 0.0
                 self._last_span_end = span_end
                 self._sample_memory()
                 self._span_count += 1
+
                 s1 = self._stats_snapshot(self.space.transport.stats)
                 s0 = self._in_stats0 or (0, 0, 0.0)
                 moves = s1[0] - s0[0]
@@ -139,8 +168,21 @@ class H3GlobalSpanRouter:
                 duty = None
                 if self._primary_gap_ms is not None:
                     duty = span_ms / max(1e-9, span_ms + self._primary_gap_ms) * 100.0
+
                 if self.telemetry and (self._span_count <= 3 or self._span_count % 10 == 0):
-                    LOG.info("H3VM Dev7 GLOBAL span #%d | gid=%s mode=%s | blocks=%d-%d | span=%.1fms primary_gap=%s duty=%s | global_moves=%d payload=%.1fMiB transport=%.1fms effective=%.2fGB/s | peak %s=%.2fGiB %s=%.2fGiB | prefetch=%s", self._span_count, self._h.id, self.space.transport.selected_mode, self.first, self.last, span_ms, "%.1fms" % self._primary_gap_ms if self._primary_gap_ms is not None else "n/a", "%.1f%%" % duty if duty is not None else "n/a", moves, moved/(1024**2), transfer_s*1000.0, payload_gbps, self.primary_device, self._peak_primary, self.secondary_device, self._peak_secondary, self._prefetch_queue is not None)
+                    LOG.info(
+                        "H3VM Dev7 GLOBAL span #%d | gid=%s mode=%s | blocks=%d-%d | "
+                        "span=%.1fms primary_gap=%s duty=%s | global_moves=%d payload=%.1fMiB "
+                        "transport=%.1fms effective=%.2fGB/s | peak %s=%.2fGiB %s=%.2fGiB | prefetch=%s",
+                        self._span_count, self._h.id, self.space.transport.selected_mode,
+                        self.first, self.last, span_ms,
+                        "%.1fms" % self._primary_gap_ms if self._primary_gap_ms is not None else "n/a",
+                        "%.1f%%" % duty if duty is not None else "n/a",
+                        moves, moved/(1024**2), transfer_s*1000.0, payload_gbps,
+                        self.primary_device, self._peak_primary,
+                        self.secondary_device, self._peak_secondary,
+                        self._prefetch_queue is not None,
+                    )
                 self._clear()
             return h
         except Exception:
@@ -152,11 +194,17 @@ class H3GlobalBlockProxyFactory:
     @staticmethod
     def make(router, index):
         import torch
+
         class H3GlobalBlockProxy(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.router = router
                 self.index = int(index)
+
             def forward(self, x, t_emb, mod_segments, rope_freqs, transformer_options=None):
-                return self.router.execute(self.index, x, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
+                return self.router.execute(
+                    self.index, x, t_emb, mod_segments, rope_freqs,
+                    transformer_options=transformer_options,
+                )
+
         return H3GlobalBlockProxy()

@@ -9,6 +9,7 @@ MiniMax H3 多卡加载与显存调度节点。目标不是提供一条固定工
 - GitHub: `bt420000-collab`
 - Bilibili: https://space.bilibili.com/16826253
 
+
 ## 核心节点
 
 `H3VM Multi-GPU Loader｜H3多卡加载器`
@@ -123,4 +124,4 @@ Capacity 档位测试建议先跑：
 
 ## License
 
-本项目采用 GPL-3.0，见 `LICENSE` 与 `THIRD_PARTY_NOTICES.md`。
+见 `LICENSE` 与 `THIRD_PARTY_NOTICES.md`。
