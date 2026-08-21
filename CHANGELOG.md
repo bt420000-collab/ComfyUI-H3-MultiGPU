@@ -1,5 +1,15 @@
 # Changelog
 
+## main｜H3VM Core preview
+
+- 新增 `h3vm.core_adapter`，把 GPU 模式策略从具体 Loader 中抽成共享 Core。
+- 现有 Master Loader 通过运行时 bridge 继续保留原 UI 和 Larry / LightX 专用兼容路径，但模式参数改为共用 Core。
+- 新增内部 `adapt_model(model, config=H3VMCoreConfig(...))` 通用 MODEL 接口。
+- 通用 MODEL 首版支持 clean H3 与标准 ModelPatcher weight-patch LoRA；会把 patch 状态镜像到 H3VM block/helper patcher。
+- runtime injections / object patches / hook patches / weight-wrapper patches 暂时 fail-closed，避免 GPU0/GPU1 数学路径不一致。
+- 通用 MODEL 使用 ComfyUI 官方 `deepclone_multigpu()` 创建独立模型副本，不直接改写上游 MODEL。
+- 公共节点数量不增加，普通用户继续使用 `H3VM Multi-GPU Loader｜H3多卡加载器`。
+
 ## v0.20.0-rc1
 
 - 产品入口更名为 `H3VM Multi-GPU Loader｜H3多卡加载器`。
