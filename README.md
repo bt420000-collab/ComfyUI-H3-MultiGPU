@@ -1,10 +1,20 @@
 # H3VM Multi-GPU Loader for ComfyUI
 
-MiniMax H3 多卡加载与显存调度节点。目标不是提供一条固定工作流，而是把 H3 的模型加载、Turbo LoRA、步数、时长、分辨率、GPU 模式和 Video VAE 调度收进一个统一入口，方便接入任意 H3 工作流。
+MiniMax H3 多卡加载与显存调度节点。目标不是提供一条固定工作流，而是把 H3 的模型加载、Turbo LoRA、普通 Style/角色 LoRA、步数、时长、分辨率、GPU 模式和 Video VAE 调度收进一个统一入口，方便接入任意 H3 工作流。
 
-> 当前版本：v0.20.0-rc1
->
-> `main` 分支已加入 H3VM Core 通用 MODEL 接口预览；公开节点数量不变。
+> 当前版本：v0.20.0-rc5
+
+## 两种使用形态
+
+### 1. H3VM Multi-GPU Loader｜H3多卡加载器
+
+独立使用的一体化主控。继续负责模型、Turbo、Steps、Prompt、分辨率、Seed 等便捷生成控制，适合直接生成和快速 A/B。
+
+### 2. H3VM Core｜多卡执行引擎
+
+用于接入复杂主工作流，接口边界是 `MODEL -> H3VM execution -> MODEL`。主工作流先完成 Ref2VA/FL2VA、Turbo、普通 LoRA、Sigma/Scheduler 等业务路由，再把最终 MODEL 交给 Core。Core 只负责 GPU 模式、显存/执行调度和 telemetry，不修改 Prompt、Seed、分辨率、Sampler、Sigmas 或实际采样步数。
+
+当前 Generic Core 已支持 clean H3 和普通 ModelPatcher weight patches（常见 `LoraLoaderModelOnly`）。runtime injections、object/hook/weight-wrapper patches 仍 fail-closed，防止 GPU0/GPU1 计算不同模型。
 
 ## 作者 / Author
 
@@ -44,9 +54,11 @@ MiniMax H3 多卡加载与显存调度节点。目标不是提供一条固定工
 
 当前实测建议使用 **8 步**。在当前 16GB + 8GB 测试机上，4 步 Capacity 曾出现明显音质下降；INT8 Attention 与官方 optimized/Sage Attention A/B 音质一致，因此当前不把问题归因于 Attention kernel。
 
-### 双卡同步加速｜需外部后端
+### 双卡满血｜原版20步
 
-预留接口。当前版本不会静默降级，未接入兼容的同步多卡后端时会明确报错。
+模式 4 现已接入历史 Dev9.4 Stock H3 FullThrottle 路径。该模式忽略 Turbo LoRA 与 4/6/8 步预设，固定使用原版 H3 `res_multistep` + 20 steps，不应用 Turbo SigmaShift；普通 Style / 角色 LoRA Stack 仍然生效。双卡执行使用 22/28 Snapshot Islands、2GB RAM backing 与 linear predictor 0.75。
+
+注意：这里的“原版”指 **原版 H3 权重/采样契约**；Dev9.4 FullThrottle 执行器本身使用 stale/predicted boundary snapshot，是实验性近似双卡推理，并非逐层严格同步的 exact execution。
 
 ## 双卡扩显存档位
 
@@ -63,6 +75,18 @@ MiniMax H3 多卡加载与显存调度节点。目标不是提供一条固定工
 
 下拉框只保留人话说明。实际 MLP 比例、Attention heads、trim interval、VRAM reserve 与 hot cache 会输出到控制台日志，方便提交测试结果。
 
+## 普通 Style / 角色 LoRA
+
+使用公开节点 `H3VM Style LoRA Stack｜普通LoRA叠加`。它与 Turbo 加速 LoRA 分离：普通 LoRA 使用 ComfyUI `LoraLoaderModelOnly` 同类的标准 ModelPatcher weight-patch 语义，并在 H3VM 建立双卡执行树时同步到实际拥有对应权重的 root / island / helper patcher。
+
+- SINGLE_GPU：支持
+- DUAL_QUIET：支持
+- DUAL_CAPACITY：支持
+- DUAL_SYNC_ACCEL / Stock FullThrottle：支持普通 Style LoRA，但继续禁用 Turbo 加速 LoRA
+- 每个 Stack 节点提供 4 个槽位，可通过 `previous_stack` 继续串接，因此不是最多 4 个 LoRA
+
+已知 Larry / LightX H3 Turbo 权重必须放在 Master Loader 的 Turbo 槽，不允许伪装成普通 Style LoRA。
+
 ## Turbo LoRA
 
 当前 Master Loader 已适配两类常见 H3 Turbo LoRA：
@@ -71,36 +95,6 @@ MiniMax H3 多卡加载与显存调度节点。目标不是提供一条固定工
 - ModelTC / LightX2V `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors`
 
 加载器会根据 LoRA 家族选择对应 sampler 语义，并统一处理 12 / 3 video-audio sigma shift。步数统一提供 4 / 6 / 8 三档；若权重有更严格的步数契约，会在运行时提示或锁定。
-
-## H3VM Core 通用 MODEL 接口（main 预览）
-
-项目现在拆成两层，但普通用户的使用方式不变：
-
-- **H3VM Core**：`MODEL → H3VM execution → MODEL`，只负责 GPU 模式、双卡调度、显存驻留和 telemetry。
-- **H3VM Master Loader**：继续保留模型、Turbo LoRA、步数、时长、分辨率、Seed、Prompt 等一体化功能。
-
-Master Loader 现在会在运行时桥接到同一套 Core 模式策略，因此整合版和后续高级接口不会各维护一套 `SINGLE_GPU / DUAL_QUIET / DUAL_CAPACITY` 参数。
-
-高级工作流可使用内部 API：
-
-`h3vm.core_adapter.adapt_model(model, config=H3VMCoreConfig(...))`
-
-当前首版支持：
-
-- clean MiniMax H3 `MODEL`
-- 标准 ComfyUI `ModelPatcher` weight patches
-- 常见 `LoraLoaderModelOnly` 这类权重补丁路径
-
-当前会明确拒绝：
-
-- runtime injections
-- object patches
-- hook patches
-- weight-wrapper patches
-
-这是故意 fail-closed。以上机制可能直接绑定模块对象，如果没有为 GPU1 helper 精确重映射，虽然“能跑”，主副卡算的可能已经不是同一套模型。Larry injection/bypass Turbo 在 Master Loader 内仍继续使用现有已验证的 H3VM 专用兼容路径，不受这个限制。
-
-通用 Core 内部使用 ComfyUI 自带的 `deepclone_multigpu()` 生成独立模型副本，再把标准 weight-patch 状态镜像到 H3VM block/helper patcher。后续研究重点是补齐 device-aware injection remap，而不是用静默降级换“兼容”。
 
 ## 安装
 
@@ -146,8 +140,7 @@ Capacity 档位测试建议先跑：
 
 - `DUAL_QUIET`：当前日常推荐
 - `DUAL_CAPACITY`：可用但仍属于实验性容量模式，尤其欢迎不同显存组合与高分辨率测试
-- `DUAL_SYNC_ACCEL`：接口已预留，后端待接入
-- `H3VM Core prebuilt MODEL`：weight-patch 路径进入 main 预览，injection remap 继续开发
+- `DUAL_SYNC_ACCEL`：内置 Stock H3 20-step FullThrottle（Dev9.4 Snapshot Islands，实验性近似执行）
 
 项目不会把“GPU1 更忙”当作加速成功。性能模式以 wall time / 主卡关键路径为准；Capacity 模式则以“单卡 OOM、双卡能完成”为主要成功标准。
 
