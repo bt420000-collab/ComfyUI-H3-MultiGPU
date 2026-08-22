@@ -1,5 +1,7 @@
 # H3VM Multi-GPU Loader for ComfyUI
 
+**中文** | [English](README_EN.md)
+
 MiniMax H3 多卡加载与显存调度节点。目标不是提供一条固定工作流，而是把 H3 的模型加载、Turbo LoRA、普通 Style/角色 LoRA、步数、时长、分辨率、GPU 模式和 Video VAE 调度收进一个统一入口，方便接入任意 H3 工作流。
 
 > 当前版本：v0.20.0-rc5
