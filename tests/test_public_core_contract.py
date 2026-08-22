@@ -35,3 +35,10 @@ def test_prebuilt_mode4_uses_steps_hint_not_stock_20_contract():
     block = text[i:i+3200]
     assert "expected_steps=max(1, int(config.expected_steps))" in block
     assert "turbo_lora_name=None" in block
+
+
+if __name__ == "__main__":
+    test_public_core_node_is_registered_and_business_neutral()
+    test_master_loader_remains_integrated_cockpit()
+    test_prebuilt_mode4_uses_steps_hint_not_stock_20_contract()
+    print("H3VM Public Core contract tests passed")

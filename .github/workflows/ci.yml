@@ -18,15 +18,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install test dependency
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pytest
       - name: Compile rc5 wrapper and frozen runtime adapters
         run: |
           python -m py_compile __init__.py base_runtime.py h3vm/__init__.py h3vm/core_adapter.py h3vm/core_adapter_base.py h3vm/loader.py h3vm/loader_base.py h3vm/master_console.py h3vm/style_lora.py
-      - name: Run rc5 contracts
+      - name: Run rc5 contracts directly
         env:
           PYTHONPATH: .
         run: |
-          python -m pytest -q tests/test_core_adapter_contract.py tests/test_public_core_contract.py tests/test_style_lora_contract.py
+          python tests/test_core_adapter_contract.py
+          python tests/test_public_core_contract.py
+          python tests/test_style_lora_contract.py
