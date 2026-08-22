@@ -1,0 +1,130 @@
++    The asset loader class is rebound here to build through
+     build_asset_model(). Thus the familiar integrated UI is preserved while the
+     generic MODEL API and Master Loader share one mode policy implementation.
+     """
+@@ -377,7 +536,7 @@ def install_runtime_bridge() -> bool:
+ 
+     def core_load(self, mode, unet_name, lora_name, strength=1.0, low_vram=False,
+                   primary_device="gpu:0", secondary_device="gpu:1",
+-                  capacity_vram_profile="SAFE｜保守·最稳",
++                  capacity_vram_profile="SAFE｜保守·最稳", style_lora_stack=None,
+                   capacity_mlp_chunk_rows=4096, capacity_outproj_chunk_rows=4096,
+                   capacity_helper_heads=16, capacity_attention_kernel="INT8_CURRENT",
+                   telemetry=True, expected_steps=4):
+@@ -399,6 +558,7 @@ def install_runtime_bridge() -> bool:
+             turbo_strength=float(strength),
+             turbo_low_vram=bool(low_vram),
+             config=config,
++            style_lora_stack=style_lora_stack,
+         )
+         return (model,)
+ 
+ diff --git a/h3vm/loader.py b/h3vm/loader.py
+index ccc21c0..1fb808e 100644
+--- a/h3vm/loader.py
++++ b/h3vm/loader.py
+@@ -1170,7 +1170,8 @@ def build_h3_snapshot_islands_full_throttle(*, unet_name: str, primary_device: s
+                                              launch_tail_before_stage: bool, host_feeder: str,
+                                              pinned_mailbox_mb: int, secondary_ram_backing_gb: float, telemetry: bool,
+                                              turbo_lora_name: str | None = None, turbo_strength: float = 1.0,
+-                                             turbo_low_vram: bool = False, exact_steps=None, quality_profile: str = "FAST | E-S-P-E"):
++                                             turbo_low_vram: bool = False, exact_steps=None, quality_profile: str = "FAST | E-S-P-E",
++                                             style_lora_stack=None):
+     """Dev9.1 Full Throttle Snapshot Compute Islands.
+ 
+     Goals:
+@@ -1242,6 +1243,12 @@ def build_h3_snapshot_islands_full_throttle(*, unet_name: str, primary_device: s
+     )
+ 
+     patcher, dm = _load_private_h3(unet_name, primary, safe_profile)
++    from .style_lora import apply_style_stack_to_private_patcher, merge_weight_patch_state, filter_weight_patch_state_inplace, stack_summary
++    patcher, style_patch_state, style_specs = apply_style_stack_to_private_patcher(patcher, style_lora_stack)
++    dm = _validate_h3(patcher)
++    if style_specs:
++        LOG.info("H3VM Style LoRA | mode=SnapshotFullThrottle | stack=%s | patch_keys=%d",
++                 stack_summary(style_specs), len(style_patch_state))
+     turbo_plan = None
+     if turbo_lora_name:
+         from .turbo_compat import prepare_turbo_plan
+@@ -1317,6 +1324,13 @@ def build_h3_snapshot_islands_full_throttle(*, unet_name: str, primary_device: s
+         p.size = 0
+         p.cached_patcher_init = None
+ 
++    if style_patch_state:
++        style_replayed = merge_weight_patch_state(prefix_patcher, style_patch_state)
++        style_replayed += merge_weight_patch_state(tail_patcher, style_patch_state)
++        main_style_entries = filter_weight_patch_state_inplace(patcher)
++        LOG.info("H3VM Style LoRA replay | Snapshot islands patch_entries=%d main_fixed_entries=%d",
++                 style_replayed, main_style_entries)
++
+     turbo_counts = None
+     if turbo_plan is not None:
+         from .turbo_compat import apply_turbo_plan_to_islands
+@@ -1726,7 +1740,8 @@ def build_h3_streaming_exact_turbo(*, unet_name: str, turbo_lora_name: str, turb
+                                    capacity_mlp_chunk_rows: int = 4096,
+                                    capacity_outproj_chunk_rows: int = 4096,
+                                    capacity_helper_heads: int = 16,
+-                                   capacity_attention_kernel: str = "INT8_CURRENT"):
++                                   capacity_attention_kernel: str = "INT8_CURRENT",
++                                   style_lora_stack=None):
+     """Dev12.1 RAM-first striped streaming exact H3 Turbo runtime.
+ 
+     Unlike Dev11, this branch does not ask either GPU to own a resident contiguous
+@@ -1778,6 +1793,12 @@ def build_h3_streaming_exact_turbo(*, unet_name: str, turbo_lora_name: str, turb
+         pass
+ 
+     patcher, dm = _load_private_h3(unet_name, primary, safe_profile)
++    from .style_lora import apply_style_stack_to_private_patcher, merge_weight_patch_state, filter_weight_patch_state_inplace, stack_summary
++    patcher, style_patch_state, style_specs = apply_style_stack_to_private_patcher(patcher, style_lora_stack)
++    dm = _validate_h3(patcher)
++    if style_specs:
++        LOG.info("H3VM Style LoRA | mode=StreamingExact | stack=%s | patch_keys=%d",
++                 stack_summary(style_specs), len(style_patch_state))
+ 
+     from .turbo_compat import prepare_turbo_plan
+     turbo_plan = prepare_turbo_plan(
+@@ -1946,6 +1967,15 @@ def build_h3_streaming_exact_turbo(*, unet_name: str, turbo_lora_name: str, turb
+         p.size = 0
+         p.cached_patcher_init = None
+ 
++    if style_patch_state:
++        style_replayed = 0
++        for style_target in (primary_island_patcher, secondary_island_patcher,
++                             primary_mlp_helper_patcher, secondary_mlp_helper_patcher):
++            style_replayed += merge_weight_patch_state(style_target, style_patch_state)
++        main_style_entries = filter_weight_patch_state_inplace(patcher)
++        LOG.info("H3VM Style LoRA replay | streaming roots/helpers patch_entries=%d main_fixed_entries=%d",
++                 style_replayed, main_style_entries)
++
+     from .turbo_compat import apply_turbo_plan_to_streaming_islands
+     turbo_counts = apply_turbo_plan_to_streaming_islands(
+         plan=turbo_plan,
+ diff --git a/h3vm/master_console.py b/h3vm/master_console.py
+index b5a9227..2ef4208 100644
+--- a/h3vm/master_console.py
++++ b/h3vm/master_console.py
+@@ -20,7 +20,14 @@ MASTER_GPU_MODES = (
+     "SINGLE_GPU｜单卡·标准模式",
+     "DUAL_QUIET｜双卡协同·日常推荐",
+     "DUAL_CAPACITY｜双卡扩显存·高清模式",
+-    "DUAL_SYNC_ACCEL｜双卡同步加速·需外部后端",
++    "DUAL_SYNC_ACCEL｜双卡满血·原版20步",
++)
++
++CORE_GPU_MODES = (
++    "SINGLE_GPU｜单卡·执行引擎",
++    "DUAL_QUIET｜双卡协同·执行引擎",
++    "DUAL_CAPACITY｜双卡扩显存·执行引擎",
++    "DUAL_SYNC_ACCEL｜双卡满血·Snapshot引擎",
+ )
+ 
+ 
+@@ -305,7 +312,7 @@ def mode_summary(mode: str) -> str:
+         "SINGLE_GPU": "GPU0 single-card baseline",
+         "DUAL_QUIET": "Dev18 dual cooperative / quiet mode",
+         "DUAL_CAPACITY": "pooled-VRAM capacity mode",
+-        "DUAL_SYNC_ACCEL": "reserved external synchronous multi-GPU backend",
++        "DUAL_SYNC_ACCEL": "built-in Stock H3 FullThrottle 20-step mode",
+     }.get(str(mode), str(mode))
+ 
+ 

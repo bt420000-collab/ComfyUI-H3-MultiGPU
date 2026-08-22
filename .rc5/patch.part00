@@ -1,0 +1,180 @@
+diff --git a/__init__.py b/__init__.py
+index 5e9a8ae..071d959 100644
+--- a/__init__.py
++++ b/__init__.py
+@@ -2124,7 +2124,8 @@ class H3VMModeSelector:
+     CATEGORY = "MiniMaxH3/H3VM/Capacity"
+     DESCRIPTION = (
+         "SINGLE_GPU = GPU0-only DiT/VAE baseline; DUAL_QUIET = frozen Dev18 dual-compute + Dual VAE; "
+-        "DUAL_CAPACITY = activation-first pooled VRAM mode for resolutions that OOM on a 16GB card."
++        "DUAL_CAPACITY = activation-first pooled VRAM mode for resolutions that OOM on a 16GB card; "
++        "DUAL_SYNC_ACCEL = built-in Stock H3 20-step Dev9.4 FullThrottle mode."
+     )
+ 
+     def select(self, mode="DUAL_QUIET"):
+@@ -2168,6 +2169,9 @@ class H3VMCapacityModeTurboLoader:
+                     "tooltip": "Audio A/B lab switch. OFFICIAL_OPTIMIZED uses ComfyUI optimized_attention (Sage when --use-sage-attention)."
+                 }),
+                 "telemetry": ("BOOLEAN", {"default": True}),
++            },
++            "optional": {
++                "style_lora_stack": ("H3VM_LORA_STACK",),
+             }
+         }
+ 
+@@ -2183,16 +2187,40 @@ class H3VMCapacityModeTurboLoader:
+     def load(self, mode, unet_name, lora_name, strength=1.0, low_vram=False,
+              primary_device="gpu:0", secondary_device="gpu:1", capacity_vram_profile="SAFE｜保守·最稳",
+              capacity_mlp_chunk_rows=4096, capacity_outproj_chunk_rows=4096,
+-             capacity_helper_heads=16, capacity_attention_kernel="INT8_CURRENT", telemetry=True, expected_steps=4):
++             capacity_helper_heads=16, capacity_attention_kernel="INT8_CURRENT", telemetry=True, expected_steps=4,
++             style_lora_stack=None):
+         from .h3vm.loader import build_h3_streaming_exact_turbo
+ 
+         mode = str(mode)
++
++        if mode == "DUAL_SYNC_ACCEL":
++            from .h3vm.loader import build_h3_snapshot_islands_full_throttle
++            print(
++                "[H3VM MODE] DUAL_SYNC_ACCEL | Stock H3 FullThrottle 20-step | "
++                "Dev9.4 22/28 + RAM2G + PREDICT075 | Turbo ignored",
++                flush=True,
++            )
++            return (build_h3_snapshot_islands_full_throttle(
++                unet_name=str(unet_name),
++                primary_device=str(primary_device), secondary_device=str(secondary_device),
++                secondary_blocks_target=22,
++                primary_reserve_gb=2.5, secondary_reserve_gb=1.5,
++                secondary_overcommit_mb=1024, safe_profile=True,
++                expected_steps=20, refresh_interval=0, exact_last_step=True,
++                predictor_mode="linear", predictor_beta=0.75,
++                prefix_prefetch=True, tail_prefetch=True, launch_tail_before_stage=True,
++                host_feeder="bounded_pinned", pinned_mailbox_mb=1024,
++                secondary_ram_backing_gb=2.0, telemetry=bool(telemetry),
++                turbo_lora_name=None, style_lora_stack=style_lora_stack,
++            ),)
++
+         common = dict(
+             unet_name=str(unet_name), turbo_lora_name=str(lora_name),
+             turbo_strength=float(strength), turbo_low_vram=bool(low_vram),
+             primary_device=str(primary_device), secondary_device=str(secondary_device),
+             stripe_size=50, expected_steps=int(expected_steps), safe_profile=True,
+             hard_cleanup_after_sample=False, telemetry=bool(telemetry),
++            style_lora_stack=style_lora_stack,
+         )
+ 
+         if mode == "SINGLE_GPU":
+@@ -2312,6 +2340,91 @@ class H3VMCapacityModeTurboLoader:
+         ),)
+ 
+ 
++class H3VMStyleLoRAStack:
++    """Appendable standard ModelPatcher LoRA stack, independent of GPU mode."""
++
++    @classmethod
++    def INPUT_TYPES(cls):
++        import folder_paths
++        from .h3vm.style_lora import NONE_LORA
++        choices = [NONE_LORA] + list(folder_paths.get_filename_list("loras"))
++        required = {}
++        for i in range(1, 5):
++            required[f"lora_{i}"] = (choices, {"default": NONE_LORA})
++            required[f"strength_{i}"] = ("FLOAT", {"default": 1.0, "min": -4.0, "max": 4.0, "step": 0.05})
++        return {
++            "required": required,
++            "optional": {"previous_stack": ("H3VM_LORA_STACK",)},
++        }
++
++    RETURN_TYPES = ("H3VM_LORA_STACK", "STRING")
++    RETURN_NAMES = ("style_lora_stack", "summary")
++    FUNCTION = "build"
++    CATEGORY = "MiniMaxH3/H3VM"
++    DESCRIPTION = (
++        "普通风格/角色 LoRA 叠加器。每个节点可放 4 个，并可串接 previous_stack，"
++        "因此没有 4 个 LoRA 的架构限制。与 Turbo/加速 LoRA 分离，四种 GPU 模式共用同一套普通 LoRA。"
++    )
++
++    def build(self, lora_1, strength_1, lora_2, strength_2, lora_3, strength_3,
++              lora_4, strength_4, previous_stack=None):
++        from .h3vm.style_lora import append_style_loras, stack_summary
++        entries = [
++            (lora_1, strength_1), (lora_2, strength_2),
++            (lora_3, strength_3), (lora_4, strength_4),
++        ]
++        stack = append_style_loras(previous_stack, entries)
++        return (stack, stack_summary(stack))
++
++
++class H3VMCoreEngine:
++    """Pure MODEL -> H3VM execution -> MODEL adapter for external workflows."""
++
++    @classmethod
++    def INPUT_TYPES(cls):
++        from .h3vm.master_console import CAPACITY_VRAM_PROFILES, CORE_GPU_MODES
++        return {
++            "required": {
++                "model": ("MODEL",),
++                "gpu_mode": (CORE_GPU_MODES, {"default": "DUAL_QUIET｜双卡协同·执行引擎"}),
++                "capacity_vram_profile": (CAPACITY_VRAM_PROFILES, {
++                    "default": "SAFE｜保守·最稳",
++                    "tooltip": "仅 DUAL_CAPACITY 执行引擎使用；不修改主工作流生成参数。"
++                }),
++                "expected_steps_hint": ("INT", {
++                    "default": 4, "min": 1, "max": 100, "step": 1,
++                    "tooltip": "仅供 H3VM 预取/最后一步调度参考；不会修改主工作流实际 sampler steps。"
++                }),
++                "telemetry": ("BOOLEAN", {"default": True}),
++            }
++        }
++
++    RETURN_TYPES = ("MODEL", "H3VM_MODE")
++    RETURN_NAMES = ("model", "mode")
++    FUNCTION = "adapt"
++    CATEGORY = "MiniMaxH3/H3VM"
++    DESCRIPTION = (
++        "纯 H3VM 执行引擎。输入应是主工作流已经完成底模、Turbo、普通 LoRA、SigmaShift 等业务处理后的最终 MODEL。"
++        "本节点不修改 Prompt、Seed、分辨率、Sampler、Sigmas 或实际 Steps；只负责单卡/双卡执行与显存调度。"
++    )
++
++    def adapt(self, model, gpu_mode="DUAL_QUIET｜双卡协同·执行引擎",
++              capacity_vram_profile="SAFE｜保守·最稳", expected_steps_hint=4, telemetry=True):
++        from .h3vm.core_adapter import H3VMCoreConfig, adapt_model
++        from .h3vm.master_console import normalize_mode
++        mode = normalize_mode(gpu_mode)
++        config = H3VMCoreConfig(
++            mode=mode,
++            primary_device="gpu:0",
++            secondary_device="gpu:1",
++            capacity_vram_profile=str(capacity_vram_profile),
++            expected_steps=max(1, int(expected_steps_hint)),
++            telemetry=bool(telemetry),
++        )
++        out = adapt_model(model, config=config)
++        return (out, mode)
++
++
+ class H3VMMasterLoader:
+     """One H3 cockpit: model + Turbo + placement + common generation controls."""
+ 
+@@ -2348,6 +2461,9 @@ class H3VMMasterLoader:
+                     "placeholder": "Prompt｜折叠时不占空间；展开后可写长 H3 提示词",
+                     "tooltip": "Prompt is intentionally the last advanced widget. Expand it only when editing long H3 prompts."
+                 }),
++            },
++            "optional": {
++                "style_lora_stack": ("H3VM_LORA_STACK",),
+             }
+         }
+ 
+@@ -2360,23 +2476,22 @@ class H3VMMasterLoader:
+     def load(self, unet_name, turbo_lora, lora_strength=1.0, gpu_mode="DUAL_QUIET",
+              capacity_vram_profile="SAFE｜保守·最稳", steps="4步｜极速", duration_seconds=15.0,
+              aspect_ratio="16:9", resolution="768P｜原生高清", custom_width=1344, custom_height=768,
+-             seed=0, telemetry=True, prompt=""):
++             seed=0, telemetry=True, prompt="", style_lora_stack=None):
+         from .h3vm.master_console import (
+             resolve_resolution, duration_to_length, resolve_steps, lora_family, mode_summary, apply_sigma_shift, normalize_mode
+         )
++        from .h3vm.style_lora import stack_summary
+ 
+         mode = normalize_mode(gpu_mode)

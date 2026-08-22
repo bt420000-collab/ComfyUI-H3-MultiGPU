@@ -57,99 +57,69 @@ def test_runtime_bridge_rebinds_existing_capacity_loader():
         sys.modules.pop(fake_parent.__name__, None)
 
 
-def test_asset_builder_uses_shared_mode_policy_without_comfy_runtime():
-    import h3vm.loader as loader
+def test_mode4_asset_route_uses_stock_full_throttle_builder():
+    import h3vm.loader as loader_mod
 
-    calls = []
-    original_builder = loader.build_h3_streaming_exact_turbo
+    calls = {}
+    original = loader_mod.build_h3_snapshot_islands_full_throttle
 
     def fake_builder(**kwargs):
-        calls.append(kwargs)
-        return kwargs
+        calls.update(kwargs)
+        return "mode4-model"
 
-    loader.build_h3_streaming_exact_turbo = fake_builder
+    loader_mod.build_h3_snapshot_islands_full_throttle = fake_builder
     try:
-        quiet = core.build_asset_model(
-            unet_name="unit-test-h3",
-            turbo_lora_name="unit-test-lora",
-            config=H3VMCoreConfig(mode="DUAL_QUIET", expected_steps=4),
+        out = core.build_asset_model(
+            unet_name="clean_h3.safetensors",
+            turbo_lora_name="ignored_turbo.safetensors",
+            turbo_strength=1.7,
+            turbo_low_vram=False,
+            config=H3VMCoreConfig(mode="DUAL_SYNC_ACCEL", telemetry=False),
         )
-        assert quiet["attention_mode"] == "force_host"
-        assert quiet["mlp_primary_fraction"] == 0.68
-        assert quiet["critical_path_post_attention_island"] is True
-        assert quiet["sidecar_mlp_blocks"] == 50
-        assert quiet["expected_steps"] == 4
-
-        single = core.build_asset_model(
-            unet_name="unit-test-h3",
-            turbo_lora_name="unit-test-lora",
-            config=H3VMCoreConfig(mode="SINGLE_GPU", expected_steps=8),
-        )
-        assert single["attention_mode"] == "off"
-        assert single["mlp_token_parallel"] is False
-        assert single["expected_steps"] == 8
+        assert out == "mode4-model"
+        assert calls["unet_name"] == "clean_h3.safetensors"
+        assert calls["secondary_blocks_target"] == 22
+        assert calls["expected_steps"] == 20
+        assert calls["predictor_mode"] == "linear"
+        assert calls["predictor_beta"] == 0.75
+        assert calls["secondary_ram_backing_gb"] == 2.0
+        assert calls["turbo_lora_name"] is None
+        assert calls["safe_profile"] is True
+        assert calls["host_feeder"] == "bounded_pinned"
+        assert calls["pinned_mailbox_mb"] == 1024
     finally:
-        loader.build_h3_streaming_exact_turbo = original_builder
-
-    assert len(calls) == 2
+        loader_mod.build_h3_snapshot_islands_full_throttle = original
 
 
-def test_prebuilt_bridge_copies_and_restores_hooks():
-    import h3vm.loader as loader
-    import h3vm.turbo_compat as turbo
+def test_mode4_auto_falls_back_when_comfy_global_pinned_is_enabled():
+    fake_comfy = ModuleType("comfy")
+    fake_cli = ModuleType("comfy.cli_args")
+    fake_cli.args = SimpleNamespace(disable_pinned_memory=False)
+    old_comfy = sys.modules.get("comfy")
+    old_cli = sys.modules.get("comfy.cli_args")
+    sys.modules["comfy"] = fake_comfy
+    sys.modules["comfy.cli_args"] = fake_cli
+    try:
+        policy = core._mode4_fullthrottle_host_policy()
+        assert policy["safe_profile"] is False
+        assert policy["host_feeder"] == "pageable"
+        assert policy["pinned_mailbox_mb"] == 0
+    finally:
+        if old_comfy is None:
+            sys.modules.pop("comfy", None)
+        else:
+            sys.modules["comfy"] = old_comfy
+        if old_cli is None:
+            sys.modules.pop("comfy.cli_args", None)
+        else:
+            sys.modules["comfy.cli_args"] = old_cli
 
-    private = SimpleNamespace(
-        patches={"diffusion_model.blocks.0.mlp.fc1.weight": ["PATCH"]},
-        patches_uuid="uuid1",
-        force_cast_weights=True,
-    )
-    original_load = loader._load_private_h3
-    original_prepare = turbo.prepare_turbo_plan
-    original_stream = turbo.apply_turbo_plan_to_streaming_islands
-    original_mlp = turbo.apply_turbo_plan_to_mlp_helpers
-    original_attention = turbo.apply_turbo_plan_to_attention_helpers
-
-    with core._prebuilt_streaming_bridge(private):
-        assert loader._load_private_h3 is not original_load
-        assert turbo.prepare_turbo_plan is not original_prepare
-
-        main = SimpleNamespace(
-            patches=private.patches,
-            patches_uuid=private.patches_uuid,
-            force_cast_weights=True,
-        )
-        primary = SimpleNamespace(patches={}, patches_uuid=None, force_cast_weights=False)
-        secondary = SimpleNamespace(patches={}, patches_uuid=None, force_cast_weights=False)
-        result = turbo.apply_turbo_plan_to_streaming_islands(
-            plan=object(), main_patcher=main, dm=None,
-            primary_island_patcher=primary,
-            secondary_island_patcher=secondary,
-            owner_map={}, primary_device=None, secondary_device=None,
-        )
-        assert result["patch_entries"] == 2
-        assert primary.patches_uuid == "uuid1"
-        assert secondary.patches_uuid == "uuid1"
-
-        helper0 = SimpleNamespace(patches={}, patches_uuid=None, force_cast_weights=False)
-        helper1 = SimpleNamespace(patches={}, patches_uuid=None, force_cast_weights=False)
-        helper_result = turbo.apply_turbo_plan_to_mlp_helpers(
-            plan=object(), primary_helper_patcher=helper0,
-            secondary_helper_patcher=helper1, owner_map={},
-            primary_device=None, secondary_device=None, helper_indices=[0],
-        )
-        assert helper_result["patch_entries"] == 2
-
-    assert loader._load_private_h3 is original_load
-    assert turbo.prepare_turbo_plan is original_prepare
-    assert turbo.apply_turbo_plan_to_streaming_islands is original_stream
-    assert turbo.apply_turbo_plan_to_mlp_helpers is original_mlp
-    assert turbo.apply_turbo_plan_to_attention_helpers is original_attention
 
 
 if __name__ == "__main__":
     test_static_mode_policy()
     test_weight_patch_mirror_isolated_lists()
     test_runtime_bridge_rebinds_existing_capacity_loader()
-    test_asset_builder_uses_shared_mode_policy_without_comfy_runtime()
-    test_prebuilt_bridge_copies_and_restores_hooks()
+    test_mode4_asset_route_uses_stock_full_throttle_builder()
+    test_mode4_auto_falls_back_when_comfy_global_pinned_is_enabled()
     print("H3VM Core contract tests passed")

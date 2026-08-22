@@ -1,0 +1,180 @@
+-        if mode == "DUAL_SYNC_ACCEL":
+-            raise RuntimeError(
+-                "H3VM DUAL_SYNC_ACCEL is a reserved backend slot. Install/wire a compatible external "
+-                "same-model synchronous multi-GPU backend before selecting this mode. "
+-                "SINGLE_GPU / DUAL_QUIET / DUAL_CAPACITY are available now."
+-            )
+ 
+         width, height = resolve_resolution(aspect_ratio, resolution, custom_width, custom_height)
+         length = duration_to_length(float(duration_seconds))
+-        step_count, note = resolve_steps(str(turbo_lora), str(steps))
+-        family = lora_family(str(turbo_lora))
++        if mode == "DUAL_SYNC_ACCEL":
++            step_count, note = 20, "Mode 4 uses Stock H3 FullThrottle: Turbo LoRA and 4/6/8-step preset are ignored; ordinary Style LoRA stack remains enabled; forced to 20 steps."
++            family = "STOCK_H3"
++        else:
++            step_count, note = resolve_steps(str(turbo_lora), str(steps))
++            family = lora_family(str(turbo_lora))
+         if note:
+             print(f"[H3VM MASTER] Turbo step note: {note}", flush=True)
+         if mode == "DUAL_CAPACITY" and int(step_count) < 8:
+@@ -2389,7 +2504,8 @@ class H3VMMasterLoader:
+         print(
+             f"[H3VM MASTER] mode={mode_summary(mode)} | lora={turbo_lora} family={family} | "
+             f"steps={step_count} | duration={float(duration_seconds):.2f}s -> length={length} | "
+-            f"canvas={width}x{height} ({aspect_ratio}, {resolution}) | capacity_vram={capacity_vram_profile}",
++            f"canvas={width}x{height} ({aspect_ratio}, {resolution}) | capacity_vram={capacity_vram_profile} | "
++            f"style_lora={stack_summary(style_lora_stack)}",
+             flush=True,
+         )
+ 
+@@ -2404,23 +2520,30 @@ class H3VMMasterLoader:
+             capacity_mlp_chunk_rows=4096, capacity_outproj_chunk_rows=4096,
+             capacity_helper_heads=16, capacity_attention_kernel="INT8_CURRENT",
+             telemetry=bool(telemetry), expected_steps=int(step_count),
++            style_lora_stack=style_lora_stack,
+         )[0]
+ 
+-        # Both supported Turbo families use 12/3 flow shifts, but their published
+-        # sampler contracts differ. LightX2V uses stock Euler; Larry keeps its
+-        # custom dual-clock sampler.
+-        model = apply_sigma_shift(model, 12.0, 3.0)
+         import comfy.samplers
+-        if family.startswith("LIGHTX2V_"):
+-            sampler = comfy.samplers.sampler_object("euler")
+-            sampler_kind = "euler+ModelSamplingAV(12/3)"
++        if mode == "DUAL_SYNC_ACCEL":
++            # Historical Dev9.4 stock-H3 contract: no Turbo LoRA, no SigmaShift,
++            # stock res_multistep sampler and 20 scheduler steps.
++            sampler = comfy.samplers.sampler_object("res_multistep")
++            sampler_kind = "stock_res_multistep+20step(no_sigma_shift)"
+         else:
+-            from .h3vm.turbo_compat import _load_larry_module
+-            larry = _load_larry_module()
+-            if not hasattr(larry, "_turbo_sampler"):
+-                raise RuntimeError("Installed ComfyUI-MiniMax-H3-Turbo lacks _turbo_sampler; please update it.")
+-            sampler = comfy.samplers.KSAMPLER(larry._turbo_sampler)
+-            sampler_kind = "larry_dual_clock(12/3)"
++            # Both supported Turbo families use 12/3 flow shifts, but their published
++            # sampler contracts differ. LightX2V uses stock Euler; Larry keeps its
++            # custom dual-clock sampler.
++            model = apply_sigma_shift(model, 12.0, 3.0)
++            if family.startswith("LIGHTX2V_"):
++                sampler = comfy.samplers.sampler_object("euler")
++                sampler_kind = "euler+ModelSamplingAV(12/3)"
++            else:
++                from .h3vm.turbo_compat import _load_larry_module
++                larry = _load_larry_module()
++                if not hasattr(larry, "_turbo_sampler"):
++                    raise RuntimeError("Installed ComfyUI-MiniMax-H3-Turbo lacks _turbo_sampler; please update it.")
++                sampler = comfy.samplers.KSAMPLER(larry._turbo_sampler)
++                sampler_kind = "larry_dual_clock(12/3)"
+         print(f"[H3VM MASTER] sampler={sampler_kind}", flush=True)
+ 
+         return (
+@@ -2481,7 +2604,7 @@ class H3VMModeAwareVideoVAEDecode:
+         return (images,)
+ 
+ 
+-print("[H3VM v0.20.0-rc1] Multi-GPU Loader ready | Single / Dual Quiet / Dual Capacity", flush=True)
++print("[H3VM v0.20.0-rc5] Master Loader + public MODEL->MODEL Core engine ready", flush=True)
+ 
+ class H3VMDev18PostAttentionIslandTurboLoader(H3VMDev17RollingMLPStressTurboLoader):
+     """Dev18: all-50 rolling helper + larger post-attention row compute island."""
+@@ -2583,10 +2706,14 @@ if H3VM_SHOW_LAB_NODES:
+ 
+ PUBLIC_NODE_CLASS_MAPPINGS = {
+     "H3VMMasterLoader": H3VMMasterLoader,
++    "H3VMCoreEngine": H3VMCoreEngine,
++    "H3VMStyleLoRAStack": H3VMStyleLoRAStack,
+     "H3VMModeAwareVideoVAEDecode": H3VMModeAwareVideoVAEDecode,
+ }
+ PUBLIC_NODE_DISPLAY_NAME_MAPPINGS = {
+     "H3VMMasterLoader": "H3VM Multi-GPU Loader｜H3多卡加载器",
++    "H3VMCoreEngine": "H3VM Core｜多卡执行引擎",
++    "H3VMStyleLoRAStack": "H3VM Style LoRA Stack｜普通LoRA叠加",
+     "H3VMModeAwareVideoVAEDecode": "H3VM Video VAE Decode｜跟随显卡模式",
+ }
+ 
+ diff --git a/h3vm/core_adapter.py b/h3vm/core_adapter.py
+index d2dad46..6c789c1 100644
+--- a/h3vm/core_adapter.py
++++ b/h3vm/core_adapter.py
+@@ -57,8 +57,8 @@ def execution_kwargs(config: H3VMCoreConfig) -> dict:
+     mode = _normalize_mode(config.mode)
+     if mode == "DUAL_SYNC_ACCEL":
+         raise RuntimeError(
+-            "H3VM DUAL_SYNC_ACCEL is a reserved backend slot. Install/wire a compatible "
+-            "same-model synchronous multi-GPU backend before selecting this mode."
++            "H3VM DUAL_SYNC_ACCEL uses the dedicated built-in Stock H3 FullThrottle builder; "
++            "streaming execution_kwargs() are not applicable to this mode."
+         )
+ 
+     if mode == "SINGLE_GPU":
+@@ -166,8 +166,41 @@ def _common_builder_kwargs(config: H3VMCoreConfig) -> dict:
+     )
+ 
+ 
++def _mode4_fullthrottle_host_policy() -> dict:
++    """Choose a safe Dev9.4 host feeder for the active ComfyUI pinning policy.
++
++    Historical Dev9.4 used ``--disable-pinned-memory`` plus an H3VM-owned,
++    bounded 1 GiB pinned mailbox.  Product Mode 4 must also work under normal
++    ComfyUI startup where global pinned memory is enabled.  In that case we do
++    not create a second explicit pinned pool: activation/snapshot traffic falls
++    back to ordinary pageable RAM while ComfyUI keeps ownership of its global
++    pinned-weight policy.
++    """
++    pinned_disabled = True
++    try:
++        from comfy.cli_args import args
++        pinned_disabled = bool(getattr(args, "disable_pinned_memory", False))
++    except Exception:
++        # Unit tests / non-Comfy import: retain the historical safe profile.
++        pinned_disabled = True
++
++    if pinned_disabled:
++        return {
++            "safe_profile": True,
++            "host_feeder": "bounded_pinned",
++            "pinned_mailbox_mb": 1024,
++            "policy": "h3vm_bounded_pinned",
++        }
++    return {
++        "safe_profile": False,
++        "host_feeder": "pageable",
++        "pinned_mailbox_mb": 0,
++        "policy": "comfy_global_pinned+pageable_h3vm",
++    }
++
++
+ def build_asset_model(*, unet_name: str, turbo_lora_name: str, turbo_strength: float = 1.0,
+-                      turbo_low_vram: bool = False, config: H3VMCoreConfig):
++                      turbo_low_vram: bool = False, config: H3VMCoreConfig, style_lora_stack=None):
+     """Integrated path used by the product Master Loader.
+ 
+     The already-validated Larry/LightX Turbo compatibility layer is preserved;
+@@ -177,6 +210,52 @@ def build_asset_model(*, unet_name: str, turbo_lora_name: str, turbo_strength: f
+ 
+     mode = _normalize_mode(config.mode)
+     print(f"[H3VM CORE] asset model path | mode={mode}", flush=True)
++
++    if mode == "DUAL_SYNC_ACCEL":
++        # Product Mode 4: revive the proven Dev9.4 Stock-H3 FullThrottle path.
++        # This intentionally ignores Turbo LoRA and uses the original H3 20-step
++        # sampler contract in H3VMMasterLoader.  The executor itself is the
++        # Snapshot-Islands FullThrottle runtime (approximate stale/predicted
++        # boundary features), exactly as in the historical Dev9.4 A/B workflow.
++        from .loader import build_h3_snapshot_islands_full_throttle
++        print(
++            "[H3VM CORE] DUAL_SYNC_ACCEL | built-in Stock H3 FullThrottle | "
++            "Dev9.4 22/28 + RAM2G + PREDICT075 | Turbo ignored",
++            flush=True,
++        )
++        host_policy = _mode4_fullthrottle_host_policy()
++        print(
++            "[H3VM CORE] Mode4 host policy | "
++            f"{host_policy['policy']} | feeder={host_policy['host_feeder']} "
++            f"pinned_cap={host_policy['pinned_mailbox_mb']}MiB",
++            flush=True,
++        )

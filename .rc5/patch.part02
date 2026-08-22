@@ -1,0 +1,180 @@
++        with _CORE_BUILD_LOCK:
++            return build_h3_snapshot_islands_full_throttle(
++                unet_name=str(unet_name),
++                primary_device=str(config.primary_device),
++                secondary_device=str(config.secondary_device),
++                secondary_blocks_target=22,
++                primary_reserve_gb=2.5,
++                secondary_reserve_gb=1.5,
++                secondary_overcommit_mb=1024,
++                safe_profile=bool(host_policy["safe_profile"]),
++                expected_steps=20,
++                refresh_interval=0,
++                exact_last_step=True,
++                predictor_mode="linear",
++                predictor_beta=0.75,
++                prefix_prefetch=True,
++                tail_prefetch=True,
++                launch_tail_before_stage=True,
++                host_feeder=str(host_policy["host_feeder"]),
++                pinned_mailbox_mb=int(host_policy["pinned_mailbox_mb"]),
++                secondary_ram_backing_gb=2.0,
++                telemetry=bool(config.telemetry),
++                turbo_lora_name=None,
++                style_lora_stack=style_lora_stack,
++            )
++
+     # The lock also protects the temporary prebuilt bridge used by adapt_model().
+     with _CORE_BUILD_LOCK:
+         return build_h3_streaming_exact_turbo(
+@@ -184,6 +263,7 @@ def build_asset_model(*, unet_name: str, turbo_lora_name: str, turbo_strength: f
+             turbo_lora_name=str(turbo_lora_name),
+             turbo_strength=float(turbo_strength),
+             turbo_low_vram=bool(turbo_low_vram),
++            style_lora_stack=style_lora_stack,
+             **_common_builder_kwargs(config),
+             **execution_kwargs(config),
+         )
+@@ -204,20 +284,61 @@ def _unsupported_prebuilt_state(model) -> list[str]:
+ 
+ 
+ def _copy_weight_patch_state(source, target) -> int:
+-    """Copy ordinary ModelPatcher weight patches onto an H3VM subset patcher."""
++    """Copy ordinary ModelPatcher weight patches onto an H3VM execution patcher.
++
++    Subset/helper patchers do not own the full H3 state dict.  Filter the source
++    patch set to weights physically present in the target so a normal Style/
++    Character LoRA can pass through every H3VM mode without creating dangling
++    patch keys on helper GPUs.
++    """
++    from .style_lora import merge_weight_patch_state
++
+     patches = getattr(source, "patches", {}) or {}
+-    target.patches = {key: list(values) for key, values in patches.items()}
++    target.patches = {}
++    count = merge_weight_patch_state(target, patches)
+     if hasattr(source, "patches_uuid"):
+         target.patches_uuid = source.patches_uuid
+     if hasattr(source, "force_cast_weights"):
+         target.force_cast_weights = source.force_cast_weights
+-    return sum(len(v) for v in target.patches.values())
++    return int(count)
+ 
+ 
+ class _PrebuiltWeightPatchPlan:
+     """Sentinel consumed by the temporary Turbo replay bridge."""
+ 
+ 
++@contextmanager
++def _prebuilt_fullthrottle_bridge(private_patcher):
++    """Feed a prebuilt MODEL into the historical Snapshot FullThrottle builder.
++
++    The builder normally loads its own checkpoint and optionally creates a Style
++    LoRA patch state.  For the public Core engine the workflow has already built
++    the final MODEL, so temporarily substitute that private patcher and expose its
++    existing ordinary weight patches as the replay state for prefix/tail islands.
++    No sampler, sigma, step count, LoRA choice, or prompt is changed here.
++    """
++    from . import loader as loader_mod
++    from . import style_lora as style_mod
++
++    original_load = loader_mod._load_private_h3
++    original_style_apply = style_mod.apply_style_stack_to_private_patcher
++
++    def load_private(_unet_name, _primary, _safe_profile):
++        return private_patcher, loader_mod._validate_h3(private_patcher)
++
++    def expose_prebuilt_patches(patcher, _stack):
++        state = style_mod.snapshot_weight_patch_state(patcher)
++        return patcher, state, ()
++
++    loader_mod._load_private_h3 = load_private
++    style_mod.apply_style_stack_to_private_patcher = expose_prebuilt_patches
++    try:
++        yield
++    finally:
++        loader_mod._load_private_h3 = original_load
++        style_mod.apply_style_stack_to_private_patcher = original_style_apply
++
++
+ @contextmanager
+ def _prebuilt_streaming_bridge(private_patcher):
+     """Feed a prebuilt patcher through the proven streaming builder unchanged.
+@@ -298,7 +419,10 @@ def adapt_model(model, *, config: H3VMCoreConfig):
+       * object/hook/weight-wrapper patch mechanisms.
+     """
+     import torch
+-    from .loader import _resolve_device, _validate_h3, build_h3_streaming_exact_turbo
++    from .loader import (
++        _resolve_device, _validate_h3, build_h3_streaming_exact_turbo,
++        build_h3_snapshot_islands_full_throttle,
++    )
+ 
+     mode = _normalize_mode(config.mode)
+     unsupported = _unsupported_prebuilt_state(model)
+@@ -333,15 +457,49 @@ def adapt_model(model, *, config: H3VMCoreConfig):
+     )
+ 
+     with _CORE_BUILD_LOCK:
+-        with _prebuilt_streaming_bridge(private):
+-            out = build_h3_streaming_exact_turbo(
+-                unet_name="<prebuilt-model>",
+-                turbo_lora_name="<prebuilt-weight-patches>",
+-                turbo_strength=1.0,
+-                turbo_low_vram=False,
+-                **_common_builder_kwargs(config),
+-                **execution_kwargs(config),
++        if mode == "DUAL_SYNC_ACCEL":
++            host_policy = _mode4_fullthrottle_host_policy()
++            print(
++                "[H3VM CORE] prebuilt Mode4 Snapshot engine | "
++                f"steps_hint={max(1, int(config.expected_steps))} | "
++                f"host={host_policy['policy']} | workflow sampler/sigmas unchanged",
++                flush=True,
+             )
++            with _prebuilt_fullthrottle_bridge(private):
++                out = build_h3_snapshot_islands_full_throttle(
++                    unet_name="<prebuilt-model>",
++                    primary_device=str(config.primary_device),
++                    secondary_device=str(config.secondary_device),
++                    secondary_blocks_target=22,
++                    primary_reserve_gb=2.5,
++                    secondary_reserve_gb=1.5,
++                    secondary_overcommit_mb=1024,
++                    safe_profile=bool(host_policy["safe_profile"]),
++                    expected_steps=max(1, int(config.expected_steps)),
++                    refresh_interval=0,
++                    exact_last_step=True,
++                    predictor_mode="linear",
++                    predictor_beta=0.75,
++                    prefix_prefetch=True,
++                    tail_prefetch=True,
++                    launch_tail_before_stage=True,
++                    host_feeder=str(host_policy["host_feeder"]),
++                    pinned_mailbox_mb=int(host_policy["pinned_mailbox_mb"]),
++                    secondary_ram_backing_gb=2.0,
++                    telemetry=bool(config.telemetry),
++                    turbo_lora_name=None,
++                    style_lora_stack=None,
++                )
++        else:
++            with _prebuilt_streaming_bridge(private):
++                out = build_h3_streaming_exact_turbo(
++                    unet_name="<prebuilt-model>",
++                    turbo_lora_name="<prebuilt-weight-patches>",
++                    turbo_strength=1.0,
++                    turbo_low_vram=False,
++                    **_common_builder_kwargs(config),
++                    **execution_kwargs(config),
++                )
+     try:
+         out.set_attachments("h3vm_core_adapter", {
+             "mode": mode,
+@@ -357,8 +515,9 @@ def adapt_model(model, *, config: H3VMCoreConfig):
+ def install_runtime_bridge() -> bool:
+     """Make the existing integrated loader consume the shared Core policy.
+ 
+-    No public node is added. The current H3VMMasterLoader still calls
+-    H3VMCapacityModeTurboLoader, but that class is rebound here to build through
++    The current H3VMMasterLoader still calls H3VMCapacityModeTurboLoader, while
++    the separate public H3VM Core node calls adapt_model() for prebuilt MODELs.

@@ -1,0 +1,42 @@
+name: H3VM rc5 staging builder
+
+on:
+  push:
+    branches: [rc5-staging]
+
+permissions:
+  contents: write
+
+jobs:
+  build-final-tree:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply rc5 source patch
+        shell: bash
+        run: |
+          cat .rc5/patch.part00 .rc5/patch.part01 .rc5/patch.part02 .rc5/patch.part03 > /tmp/rc5.patch
+          git apply --check /tmp/rc5.patch
+          git apply /tmp/rc5.patch
+          git diff --check
+
+      - name: Validate rc5 source
+        shell: bash
+        run: |
+          python -m py_compile __init__.py h3vm/core_adapter.py h3vm/loader.py h3vm/master_console.py h3vm/style_lora.py
+          python tests/test_core_adapter_contract.py
+          python tests/test_style_lora_contract.py
+
+      - name: Publish clean built branch
+        shell: bash
+        run: |
+          rm -rf .rc5
+          rm -f .github/workflows/rc5-apply.yml
+          git config user.name "H3VM rc5 builder"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Build H3VM rc5 final tree"
+          git push origin HEAD:refs/heads/rc5-built --force
