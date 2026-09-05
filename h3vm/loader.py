@@ -9,6 +9,14 @@ from __future__ import annotations
 from .loader_base import *  # noqa: F401,F403
 from . import loader_base as _base
 
+# ``from ... import *`` intentionally skips underscore-prefixed names.  The
+# public MODEL->MODEL Core adapter imports these helpers from this compatibility
+# wrapper, so re-export only the small private surface it actually needs.  This
+# does not alter loader_base or any scheduling/runtime algorithm.
+_resolve_device = _base._resolve_device
+_validate_h3 = _base._validate_h3
+_load_private_h3 = _base._load_private_h3
+
 _base_stream = _base.build_h3_streaming_exact_turbo
 _base_snapshot = _base.build_h3_snapshot_islands_full_throttle
 
