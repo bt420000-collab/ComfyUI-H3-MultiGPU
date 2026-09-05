@@ -25,6 +25,34 @@ def _attachment(model, key):
     return (getattr(model, "attachments", {}) or {}).get(key)
 
 
+def _streaming_private_loader_bridge():
+    """Forward a temporary wrapper-level private loader into loader_base.
+
+    The public Core prebuilt-MODEL adapter temporarily replaces this module's
+    ``_load_private_h3``.  The frozen streaming builder itself lives in
+    ``loader_base.py`` and therefore resolves its own module global.  Only when
+    the wrapper helper has actually been replaced do we mirror it into
+    loader_base for the duration of this one build, then restore it immediately.
+    Ordinary Master Loader calls take the no-op path.
+    """
+    from contextlib import contextmanager
+
+    @contextmanager
+    def bridge():
+        original = _base._load_private_h3
+        replacement = globals().get("_load_private_h3", original)
+        if replacement is original:
+            yield
+            return
+        _base._load_private_h3 = replacement
+        try:
+            yield
+        finally:
+            _base._load_private_h3 = original
+
+    return bridge()
+
+
 def _style_loader_bridge(style_lora_stack):
     """Patch base _load_private_h3 so Style LoRA exists before island creation."""
     from contextlib import contextmanager
@@ -80,11 +108,12 @@ def _replay_snapshot_style(model, patch_state):
 
 
 def build_h3_streaming_exact_turbo(*args, style_lora_stack=None, **kwargs):
-    if not style_lora_stack:
-        return _base_stream(*args, **kwargs)
-    from .style_lora import stack_summary
-    with _style_loader_bridge(style_lora_stack) as captured:
-        model = _base_stream(*args, **kwargs)
+    with _streaming_private_loader_bridge():
+        if not style_lora_stack:
+            return _base_stream(*args, **kwargs)
+        from .style_lora import stack_summary
+        with _style_loader_bridge(style_lora_stack) as captured:
+            model = _base_stream(*args, **kwargs)
     _replay_streaming_style(model, captured["state"])
     print(f"[H3VM Style LoRA] mode=StreamingExact stack={stack_summary(captured['specs'])}", flush=True)
     return model
