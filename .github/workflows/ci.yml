@@ -20,7 +20,7 @@ jobs:
           python-version: '3.12'
       - name: Compile rc5 wrapper and frozen runtime adapters
         run: |
-          python -m py_compile __init__.py base_runtime.py h3vm/__init__.py h3vm/core_adapter.py h3vm/core_adapter_base.py h3vm/loader.py h3vm/loader_base.py h3vm/master_console.py h3vm/style_lora.py
+          python -m py_compile __init__.py base_runtime.py h3vm/__init__.py h3vm/core_adapter.py h3vm/core_adapter_base.py h3vm/gpu_preflight.py h3vm/loader.py h3vm/loader_base.py h3vm/master_console.py h3vm/style_lora.py
       # Run the lightweight assert-based contracts as scripts. This avoids pytest
       # treating the ComfyUI custom-node root __init__.py as a top-level package.
       - name: Run rc5 contracts directly
@@ -30,3 +30,4 @@ jobs:
           python tests/test_core_adapter_contract.py
           python tests/test_public_core_contract.py
           python tests/test_style_lora_contract.py
+          python tests/test_gpu_preflight_contract.py

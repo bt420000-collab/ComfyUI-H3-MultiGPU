@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Fixed dual-GPU preflight so explicit `gpu:N` / `cuda:N` selections map to distinct PyTorch-logical CUDA devices before falling back to ComfyUI's resolver.
+- Identical GPU model names are explicitly supported; for example, two RTX 3080 cards are valid when both are visible to the current ComfyUI/Python process.
+- When fewer than two CUDA devices are visible, H3VM now reports `torch.cuda.device_count()` context, `CUDA_VISIBLE_DEVICES`, `NVIDIA_VISIBLE_DEVICES`, visible GPU names/VRAM, and a best-effort `nvidia-smi` physical inventory instead of the old generic “requires at least two CUDA GPUs” error.
+- Successful dual-GPU preflight now logs the resolved logical devices once, making visibility masks and same-model pairs easy to verify from the console.
+- The heavy proven runtime in `loader_base.py` remains untouched; the compatibility fix is installed before Core/loader wrappers bind runtime helpers.
+
 ## v0.20.0-rc5
 
 - Added public `H3VM Core｜多卡执行引擎`: pure `MODEL -> MODEL` integration node for external workflows.

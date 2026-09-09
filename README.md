@@ -109,6 +109,21 @@ MiniMax H3 多卡加载与显存调度节点。目标不是提供一条固定工
 
 默认节点菜单只显示公开使用节点，避免历史实验节点刷屏。开发者如需重新显示全部 Lab 节点，可在启动 ComfyUI 前设置环境变量 `H3VM_SHOW_LAB_NODES=1`。
 
+## 双卡识别与同型号显卡
+
+H3VM **不要求两张显卡型号不同**。两张 RTX 3080、两张 RTX 5060 Ti 等同型号组合都可以使用；判断依据是当前 ComfyUI/Python 进程是否能看到两个不同的 CUDA 逻辑设备，而不是显卡名称是否不同。
+
+双卡模式默认选择 `gpu:0` + `gpu:1`。这里的编号是 PyTorch 当前进程看到的**逻辑编号**。如果启动脚本设置了 `CUDA_VISIBLE_DEVICES`，物理卡会被过滤并重新编号。例如只设置 `CUDA_VISIBLE_DEVICES=0` 时，即使机器实际安装了两张卡，当前 ComfyUI 进程也只会看到一个 `cuda:0`，双卡模式无法工作；设置为 `CUDA_VISIBLE_DEVICES=0,1` 后再重启 ComfyUI，进程才会看到两个逻辑 CUDA 设备。
+
+新版 preflight 在失败时会直接打印：
+
+- `PyTorch-visible CUDA devices`
+- `CUDA_VISIBLE_DEVICES` / `NVIDIA_VISIBLE_DEVICES`
+- 当前可见 GPU 名称与显存
+- 失败时 best-effort 的 `nvidia-smi` 物理 GPU 列表
+
+成功时控制台会出现 `[H3VM GPU PREFLIGHT]`，并列出实际解析出的 primary / secondary。这样可以区分“机器有两张卡”和“当前 ComfyUI 只看见一张卡”。
+
 ## 推荐测试顺序
 
 第一次测试建议保持相同 Prompt / Seed / LoRA，只切模式：

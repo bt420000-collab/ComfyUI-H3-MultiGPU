@@ -209,6 +209,21 @@ Developers can expose the lab nodes by setting this environment variable before 
 H3VM_SHOW_LAB_NODES=1
 ```
 
+## Dual-GPU detection and identical cards
+
+H3VM does **not** require two different GPU model names. Two RTX 3080 cards, two RTX 5060 Ti cards, and other identical-model pairs are valid. What matters is that the current ComfyUI/Python process can see two different CUDA **logical devices**.
+
+Dual-GPU modes normally select `gpu:0` + `gpu:1`. These are PyTorch-visible logical indices. If the startup environment sets `CUDA_VISIBLE_DEVICES`, physical GPUs can be filtered and renumbered. For example, `CUDA_VISIBLE_DEVICES=0` exposes only one logical `cuda:0` even if the machine physically contains two GPUs. Expose both target cards, for example with `CUDA_VISIBLE_DEVICES=0,1`, and restart ComfyUI before using a dual-GPU mode.
+
+The improved preflight reports:
+
+- the number of PyTorch-visible CUDA devices
+- `CUDA_VISIBLE_DEVICES` and `NVIDIA_VISIBLE_DEVICES`
+- visible GPU names and VRAM
+- a best-effort physical `nvidia-smi` inventory when preflight fails
+
+On success, the console prints `[H3VM GPU PREFLIGHT]` with the resolved primary and secondary devices. This makes it clear whether the machine lacks a second GPU or the current process is simply hiding it.
+
 ## Recommended first test
 
 For the first validation run, keep the same prompt, seed, model, LoRA, and resolution. Change only the GPU mode.
