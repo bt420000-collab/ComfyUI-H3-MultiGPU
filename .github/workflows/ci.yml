@@ -2,7 +2,7 @@ name: H3VM Core CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'lab/**']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
           python-version: '3.12'
       - name: Compile rc6 wrapper and runtime compatibility adapters
         run: |
-          python -m py_compile __init__.py base_runtime.py h3vm/__init__.py h3vm/core_adapter.py h3vm/core_adapter_base.py h3vm/gpu_preflight.py h3vm/comfy_kitchen_multigpu.py h3vm/loader.py h3vm/loader_base.py h3vm/master_console.py h3vm/style_lora.py
+          python -m py_compile __init__.py base_runtime.py h3vm/__init__.py h3vm/core_adapter.py h3vm/core_adapter_base.py h3vm/gpu_preflight.py h3vm/comfy_kitchen_multigpu.py h3vm/loader.py h3vm/loader_base.py h3vm/master_console.py h3vm/style_lora.py h3vm/quant_shard.py h3vm/sequence_partition.py h3vm/dual16g_lab.py scripts/dual16g_lab_probe.py
       # Run the lightweight assert-based contracts as scripts. This avoids pytest
       # treating the ComfyUI custom-node root __init__.py as a top-level package.
       - name: Run rc6 contracts directly
@@ -32,3 +32,6 @@ jobs:
           python tests/test_style_lora_contract.py
           python tests/test_gpu_preflight_contract.py
           python tests/test_comfy_kitchen_multigpu_contract.py
+          python tests/test_sequence_partition_contract.py
+          python tests/test_quant_shard_contract.py
+          python tests/test_dual16g_planner_contract.py
