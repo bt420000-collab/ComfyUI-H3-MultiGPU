@@ -161,6 +161,27 @@ A ratio is not a winner merely because GPU utilization looks balanced. The
 winner is the fastest stable wall time with adequate VRAM headroom and unchanged
 output semantics.
 
+### Optional automatic log summary
+
+Capture the ComfyUI console into a text file, then run:
+
+```powershell
+G:\ComfyUI-MiniMax-H3\python_embeded\python.exe .\scripts\dual16g_log_summary.py .\dual16g_056.log `
+  --out .\dual16g_056_summary.json
+```
+
+The summary extracts:
+
+- active MLP / Attention policy;
+- Attention root/stage/helper/return timing;
+- MLP root/shadow/slack/stall timing;
+- adaptive fraction actions;
+- suspicious OOM/fallback/disabled/failed lines;
+- a simple hint indicating whether the helper is late or has spare slack.
+
+The hint is diagnostic only. Final ratio selection is based on repeated wall
+time plus stability, not on the hint alone.
+
 ## 7. Capacity mode second
 
 Only after `DUAL_QUIET` is stable, repeat a smaller matrix in `DUAL_CAPACITY`:
