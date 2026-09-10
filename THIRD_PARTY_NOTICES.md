@@ -1,6 +1,6 @@
 # Third-party notices
 
-This project was independently implemented for ComfyUI's native MiniMax H3 interfaces and was informed by two public projects:
+This project was independently implemented for ComfyUI's native MiniMax H3 interfaces and was informed by public projects listed below.
 
 ## lihaoyun6/ComfyUI-MiniMaxH3-Cache
 
@@ -32,7 +32,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-
 ## AesSedai/ComfyUI-MiniMaxH3-Parallel
 
 Historical H3VM lab work contains ideas/code paths informed by this public project. The preserved upstream license text is included at `third_party/AesSedai_ComfyUI-MiniMaxH3-Parallel_LICENSE.txt`.
+
+## Kaihui-AMD/ComfyUI-MiniMaxH3-MultiGPU
+
+The lab `quant_shard.py` implementation is adapted from the project's public MIT-licensed QuantizedTensor QKV row/head sharding approach. H3VM's surrounding symmetric dual-GPU planner, transport policy, Windows host-relay path, and SequencePartition implementation are maintained independently for H3VM's public runtime. The preserved upstream MIT license is included at `third_party/Kaihui-AMD_ComfyUI-MiniMaxH3-MultiGPU_LICENSE.txt`.
