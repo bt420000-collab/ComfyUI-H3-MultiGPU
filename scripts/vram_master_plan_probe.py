@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+from pathlib import Path
 
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--comfy-root", required=True)
     ap.add_argument("--primary", default="cuda:0")
     ap.add_argument("--secondary", default="cuda:1")
     ap.add_argument("--sequence", type=int, default=8192)
@@ -16,6 +19,11 @@ def main():
     ap.add_argument("--host-gbps", type=float, default=None)
     ap.add_argument("--ratio", default=None)
     args = ap.parse_args()
+
+    repo_root = Path(__file__).resolve().parents[1]
+    comfy_root = Path(args.comfy_root).resolve()
+    sys.path.insert(0, str(repo_root))
+    sys.path.insert(0, str(comfy_root))
 
     from h3vm.compute_planner import probe_cuda_pair, build_runtime_plan
     from h3vm.exact_sp_lab import build_exact_sp_plan
