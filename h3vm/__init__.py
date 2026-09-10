@@ -26,3 +26,12 @@ del _install_runtime_bridge
 from .vram_master_fusion import install_vram_master_fusion as _install_vram_master_fusion
 _install_vram_master_fusion()
 del _install_vram_master_fusion
+
+# Capacity keeps its exact legacy path as an automatic fallback. Supported
+# quantized QKV layers are sliced while still quantized, eliminating the old
+# full dequantize -> slice -> F.linear detour for those calls.
+from .capacity_quantized_qkv import (
+    install_capacity_quantized_qkv_patch as _install_capacity_quantized_qkv_patch,
+)
+_install_capacity_quantized_qkv_patch()
+del _install_capacity_quantized_qkv_patch
