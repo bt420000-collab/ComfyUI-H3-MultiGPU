@@ -3,12 +3,10 @@ from h3vm.capacity_quantized_qkv import _PATCH_MARKER, _looks_quantized
 
 assert getattr(CapacityFabric.execute_capacity_attention, _PATCH_MARKER, False) is True
 
-class FakeQuantizedTensor:
+class FakeTensor:
     pass
 
-fake = FakeQuantizedTensor()
-fake.__class__.__name__ = "FakeQuantizedTensor"
-assert _looks_quantized(fake) is False
+assert _looks_quantized(FakeTensor()) is False
 
 class QuantizedTensor:
     def __init__(self):
