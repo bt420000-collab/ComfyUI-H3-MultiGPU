@@ -1,26 +1,31 @@
 from __future__ import annotations
 
-"""Lab-only symmetric dual-GPU planner.
+"""Lab-only policy for near-symmetric dual-GPU H3VM systems.
 
-The public runtime historically assumes an asymmetric primary/helper pair in a
-few relay heuristics. On two near-identical 16 GB GPUs that unnecessarily caps
-GPU1 below an even 28/28 H3 attention split. This module provides an opt-in
-runtime patch while the behavior is validated on real hardware.
+The public rc6 defaults were tuned around an asymmetric 16G+8G pair. Two
+near-identical 16 GB GPUs should not inherit the same 68/32 MLP split and
+16-head helper ceiling. This module keeps equal-card experimentation isolated
+from the stable public policy and from PM/task scheduling.
 
-Enable with:
+Enable the lab overlay with:
     H3VM_DUAL16_SYMMETRIC_LAB=1
 
-No PM/task scheduling concepts live here. The patch only changes attention-head
-count planning for H3VMRelayAttentionParallel when the selected pair is judged
-near-symmetric by physical VRAM and SM count.
+Optional local tuning knob (not a public UI contract):
+    H3VM_DUAL16_PRIMARY_FRACTION=0.56
+
+The current lab knob changes the MLP row split only. Attention remains a
+balanced 28/28 target for H3's 56 heads, with the existing runtime free-memory
+safety cap still allowed to reduce helper work when necessary.
 """
 
-import logging
 import os
 
-LOG = logging.getLogger("H3VM")
-_PATCHED = False
-_LOGGED = set()
+
+_TRUE = {"1", "true", "yes", "on"}
+
+
+def lab_enabled() -> bool:
+    return os.environ.get("H3VM_DUAL16_SYMMETRIC_LAB", "0").strip().lower() in _TRUE
 
 
 def near_symmetric_values(a: float, b: float, tolerance: float = 0.08) -> bool:
@@ -32,11 +37,22 @@ def near_symmetric_values(a: float, b: float, tolerance: float = 0.08) -> bool:
     return abs(a - b) / max(a, b) <= tolerance
 
 
+def _resolve_cuda_device(value):
+    import torch
+
+    text = str(value)
+    if text.startswith("gpu:"):
+        return torch.device("cuda", int(text.split(":", 1)[1]))
+    return torch.device(text)
+
+
 def pair_is_near_symmetric(primary, secondary, *, memory_tolerance=0.08, sm_tolerance=0.08):
     import torch
 
-    pa = torch.cuda.get_device_properties(primary)
-    pb = torch.cuda.get_device_properties(secondary)
+    a = _resolve_cuda_device(primary)
+    b = _resolve_cuda_device(secondary)
+    pa = torch.cuda.get_device_properties(a)
+    pb = torch.cuda.get_device_properties(b)
     return (
         near_symmetric_values(pa.total_memory, pb.total_memory, memory_tolerance)
         and near_symmetric_values(pa.multi_processor_count, pb.multi_processor_count, sm_tolerance)
@@ -52,7 +68,7 @@ def symmetric_head_counts(heads: int) -> list[int]:
 
 
 def manual_dual_head_counts(heads: int, primary_fraction: float) -> list[int]:
-    """Future UI hook: exact integer head split from a primary-side fraction."""
+    """Future public UI hook: integer head split from a primary-side fraction."""
     heads = int(heads)
     fraction = float(primary_fraction)
     if heads < 2:
@@ -63,11 +79,81 @@ def manual_dual_head_counts(heads: int, primary_fraction: float) -> list[int]:
     return [primary, heads - primary]
 
 
+def requested_primary_fraction(default: float = 0.56) -> float:
+    raw = os.environ.get("H3VM_DUAL16_PRIMARY_FRACTION")
+    if raw is None or not str(raw).strip():
+        return float(default)
+    value = float(raw)
+    # Lab guardrail. Wider public/manual ranges can be considered after hardware
+    # telemetry proves them useful; this first sweep targets 50/50..60/40.
+    if not 0.50 <= value <= 0.60:
+        raise ValueError(
+            "H3VM_DUAL16_PRIMARY_FRACTION must be between 0.50 and 0.60 in this lab"
+        )
+    return value
+
+
+def symmetric_policy_overrides(mode: str, *, primary_fraction: float | None = None) -> dict:
+    """Return the conservative first-pass equal-card execution overrides."""
+    mode = str(mode)
+    fraction = requested_primary_fraction() if primary_fraction is None else float(primary_fraction)
+    if not 0.50 <= fraction <= 0.60:
+        raise ValueError("symmetric lab primary fraction must be within 0.50..0.60")
+
+    if mode == "DUAL_QUIET":
+        return {
+            "attention_head_balance": "balanced",
+            "attention_helper_head_cap": 28,
+            "mlp_primary_fraction": fraction,
+            # Keep adaptive slack alive around the selected center. Host relay
+            # overhead can make exact 50/50 compute slower even on equal GPUs.
+            "critical_path_min_primary_fraction": max(0.50, fraction - 0.04),
+            "critical_path_max_primary_fraction": min(0.64, fraction + 0.06),
+            "critical_path_fraction_step": 0.02,
+        }
+    if mode == "DUAL_CAPACITY":
+        return {
+            "attention_head_balance": "balanced",
+            "attention_helper_head_cap": 28,
+            "capacity_helper_heads": 28,
+            "mlp_primary_fraction": fraction,
+            # Capacity is deterministic placement/chunking, so keep the chosen
+            # ratio fixed instead of letting speed-path adaptation move it.
+            "critical_path_min_primary_fraction": fraction,
+            "critical_path_max_primary_fraction": fraction,
+        }
+    return {}
+
+
+def apply_execution_overrides(kwargs: dict, *, mode: str, primary, secondary):
+    """Apply the opt-in equal-card policy and return (new_kwargs, report_or_none)."""
+    if not lab_enabled() or str(mode) not in {"DUAL_QUIET", "DUAL_CAPACITY"}:
+        return dict(kwargs), None
+    if not pair_is_near_symmetric(primary, secondary):
+        return dict(kwargs), {
+            "active": False,
+            "reason": "selected GPUs are not near-symmetric",
+            "mode": str(mode),
+        }
+
+    fraction = requested_primary_fraction()
+    overrides = symmetric_policy_overrides(str(mode), primary_fraction=fraction)
+    out = dict(kwargs)
+    out.update(overrides)
+    return out, {
+        "active": True,
+        "mode": str(mode),
+        "primary_fraction": fraction,
+        "attention_heads": symmetric_head_counts(56),
+        "overrides": overrides,
+    }
+
+
 def inspect_visible_pair(primary="cuda:0", secondary="cuda:1"):
     import torch
 
-    a = torch.device(primary)
-    b = torch.device(secondary)
+    a = _resolve_cuda_device(primary)
+    b = _resolve_cuda_device(secondary)
     pa = torch.cuda.get_device_properties(a)
     pb = torch.cuda.get_device_properties(b)
     peer_fn = getattr(torch.cuda, "can_device_access_peer", None)
@@ -79,7 +165,7 @@ def inspect_visible_pair(primary="cuda:0", secondary="cuda:1"):
         except Exception:
             pass
     symmetric = pair_is_near_symmetric(a, b)
-    return {
+    report = {
         "primary": {
             "device": str(a),
             "name": torch.cuda.get_device_name(a),
@@ -94,55 +180,7 @@ def inspect_visible_pair(primary="cuda:0", secondary="cuda:1"):
         },
         "near_symmetric": bool(symmetric),
         "recommended_h3_heads": symmetric_head_counts(56) if symmetric else None,
+        "recommended_mlp_primary_fraction": requested_primary_fraction() if symmetric else None,
         "p2p": {"ab": peer_ab, "ba": peer_ba},
     }
-
-
-def install_dual16g_symmetric_relay_patch() -> bool:
-    """Opt-in patch: do not apply the historical small-GPU head cap to equal cards."""
-    global _PATCHED
-    if _PATCHED:
-        return True
-    if os.environ.get("H3VM_DUAL16_SYMMETRIC_LAB", "0").strip().lower() not in {
-        "1", "true", "yes", "on"
-    }:
-        return False
-
-    from .attention_parallel import H3VMRelayAttentionParallel
-
-    if getattr(H3VMRelayAttentionParallel._relay_counts, "_h3vm_dual16_lab", False):
-        _PATCHED = True
-        return True
-
-    original = H3VMRelayAttentionParallel._relay_counts
-
-    def patched(self, heads, devices, seq_len, dim_head):
-        configured_a, configured_b = self.pair
-        try:
-            symmetric = pair_is_near_symmetric(configured_a, configured_b)
-        except Exception as exc:
-            LOG.warning("H3VM dual16 lab symmetry probe failed; using stock planner | %s", exc)
-            symmetric = False
-
-        if not symmetric:
-            return original(self, heads, devices, seq_len, dim_head)
-
-        counts = symmetric_head_counts(heads)
-        key = (str(configured_a), str(configured_b), int(heads))
-        if key not in _LOGGED:
-            LOG.info(
-                "H3VM DUAL16 SYMMETRIC LAB | pair=%s/%s | heads=%d -> %d/%d | "
-                "historical helper cap bypassed for near-identical GPUs",
-                configured_a, configured_b, int(heads), counts[0], counts[1],
-            )
-            _LOGGED.add(key)
-        return counts
-
-    patched._h3vm_dual16_lab = True
-    patched._h3vm_original = original
-    H3VMRelayAttentionParallel._relay_counts = patched
-    _PATCHED = True
-    LOG.warning(
-        "H3VM DUAL16 SYMMETRIC LAB enabled | experimental equal-card relay planner active"
-    )
-    return True
+    return report
