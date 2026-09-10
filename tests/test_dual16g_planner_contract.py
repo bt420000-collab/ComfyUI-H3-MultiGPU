@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 import os
 from pathlib import Path
 
@@ -27,22 +28,22 @@ assert MOD.manual_dual_head_counts(56, 0.40) == [22, 34]
 quiet = MOD.symmetric_policy_overrides("DUAL_QUIET", primary_fraction=0.56)
 assert quiet["attention_head_balance"] == "balanced"
 assert quiet["attention_helper_head_cap"] == 28
-assert quiet["mlp_primary_fraction"] == 0.56
-assert quiet["critical_path_min_primary_fraction"] == 0.52
-assert quiet["critical_path_max_primary_fraction"] == 0.62
+assert math.isclose(quiet["mlp_primary_fraction"], 0.56, abs_tol=1e-12)
+assert math.isclose(quiet["critical_path_min_primary_fraction"], 0.52, abs_tol=1e-12)
+assert math.isclose(quiet["critical_path_max_primary_fraction"], 0.62, abs_tol=1e-12)
 
 capacity = MOD.symmetric_policy_overrides("DUAL_CAPACITY", primary_fraction=0.54)
 assert capacity["capacity_helper_heads"] == 28
-assert capacity["mlp_primary_fraction"] == 0.54
-assert capacity["critical_path_min_primary_fraction"] == 0.54
-assert capacity["critical_path_max_primary_fraction"] == 0.54
+assert math.isclose(capacity["mlp_primary_fraction"], 0.54, abs_tol=1e-12)
+assert math.isclose(capacity["critical_path_min_primary_fraction"], 0.54, abs_tol=1e-12)
+assert math.isclose(capacity["critical_path_max_primary_fraction"], 0.54, abs_tol=1e-12)
 
 old = os.environ.get("H3VM_DUAL16_PRIMARY_FRACTION")
 try:
     os.environ["H3VM_DUAL16_PRIMARY_FRACTION"] = "0.50"
-    assert MOD.requested_primary_fraction() == 0.50
+    assert math.isclose(MOD.requested_primary_fraction(), 0.50, abs_tol=1e-12)
     os.environ["H3VM_DUAL16_PRIMARY_FRACTION"] = "0.60"
-    assert MOD.requested_primary_fraction() == 0.60
+    assert math.isclose(MOD.requested_primary_fraction(), 0.60, abs_tol=1e-12)
     os.environ["H3VM_DUAL16_PRIMARY_FRACTION"] = "0.61"
     try:
         MOD.requested_primary_fraction()
