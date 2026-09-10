@@ -39,6 +39,7 @@ Write-Host ""
 Write-Host "[1/2] Unified compute planner"
 $planArgs = @(
     (Join-Path $ScriptDir "vram_master_plan_probe.py"),
+    "--comfy-root", $ComfyRoot,
     "--primary", $Primary,
     "--secondary", $Secondary,
     "--sequence", "$Sequence"
