@@ -14,7 +14,6 @@ import threading
 from . import core_adapter_base as _base
 
 _CORE_BUILD_LOCK = threading.RLock()
-_capacity_vram_plan = _base._capacity_vram_plan
 
 
 @dataclass(frozen=True)
@@ -33,6 +32,28 @@ class H3VMCoreConfig:
 def _normalize_mode(mode):
     from .master_console import normalize_mode
     return normalize_mode(mode)
+
+
+def _capacity_vram_plan(profile: str, primary_device: str, secondary_device: str) -> dict:
+    """Public Capacity plan plus opt-in equal-card lab overlay.
+
+    Keeping this wrapper in core_adapter preserves the rc6 base runtime while
+    letting the lab branch tune 16G+16G without touching PM/private scheduling.
+    """
+    plan = dict(_base._capacity_vram_plan(profile, primary_device, secondary_device))
+    try:
+        from .dual16g_lab import lab_enabled, pair_is_near_symmetric, requested_primary_fraction
+        if lab_enabled() and pair_is_near_symmetric(primary_device, secondary_device):
+            plan["mlp_primary_fraction"] = float(requested_primary_fraction())
+            plan["capacity_helper_heads"] = 28
+    except Exception as exc:
+        # A requested lab configuration should fail loudly rather than silently
+        # claiming symmetric tuning. Ordinary rc6 behavior remains unaffected
+        # when the lab flag is not enabled.
+        from .dual16g_lab import lab_enabled
+        if lab_enabled():
+            raise RuntimeError(f"H3VM dual16 lab Capacity policy failed: {exc}") from exc
+    return plan
 
 
 def _base_config(config):
@@ -56,9 +77,32 @@ def execution_kwargs(config):
     original_plan = _base._capacity_vram_plan
     _base._capacity_vram_plan = _capacity_vram_plan
     try:
-        return _base.execution_kwargs(_base_config(config))
+        kwargs = _base.execution_kwargs(_base_config(config))
     finally:
         _base._capacity_vram_plan = original_plan
+
+    from .dual16g_lab import apply_execution_overrides
+    tuned, report = apply_execution_overrides(
+        kwargs,
+        mode=mode,
+        primary=config.primary_device,
+        secondary=config.secondary_device,
+    )
+    if report is not None:
+        if report.get("active"):
+            print(
+                "[H3VM DUAL16 LAB] symmetric policy ACTIVE | "
+                f"mode={mode} MLP={report['primary_fraction']*100:.0f}/{(1.0-report['primary_fraction'])*100:.0f} "
+                f"ATTN={report['attention_heads'][0]}/{report['attention_heads'][1]} | "
+                "manual UI remains hidden",
+                flush=True,
+            )
+        else:
+            print(
+                f"[H3VM DUAL16 LAB] inactive | mode={mode} reason={report.get('reason')}",
+                flush=True,
+            )
+    return tuned
 
 
 def _common_builder_kwargs(config):
@@ -148,6 +192,11 @@ def adapt_model(model, *, config):
     mode = _normalize_mode(config.mode)
     if mode != "DUAL_SYNC_ACCEL":
         with _filtered_prebuilt_replay():
+            # core_adapter_base calls its own execution_kwargs, so temporarily
+            # redirect its Capacity planner and then apply the symmetric runtime
+            # kwargs by using the public adapter path below where possible.
+            # Prebuilt model adaptation remains rc6-compatible; the dual16 lab is
+            # primarily validated through the integrated/Master path first.
             return _base.adapt_model(model, config=_base_config(config))
 
     import torch
