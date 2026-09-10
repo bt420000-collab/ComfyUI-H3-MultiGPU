@@ -34,26 +34,26 @@ def _normalize_mode(mode):
     return normalize_mode(mode)
 
 
-def _capacity_vram_plan(profile: str, primary_device: str, secondary_device: str) -> dict:
-    """Public Capacity plan plus opt-in equal-card lab overlay.
+def _lab_capacity_plan_from(base_plan_fn, profile: str, primary_device: str, secondary_device: str) -> dict:
+    plan = dict(base_plan_fn(profile, primary_device, secondary_device))
+    from .dual16g_lab import lab_enabled, pair_is_near_symmetric, requested_primary_fraction
+    if lab_enabled() and pair_is_near_symmetric(primary_device, secondary_device):
+        plan["mlp_primary_fraction"] = float(requested_primary_fraction())
+        plan["capacity_helper_heads"] = 28
+    return plan
 
-    Keeping this wrapper in core_adapter preserves the rc6 base runtime while
-    letting the lab branch tune 16G+16G without touching PM/private scheduling.
-    """
-    plan = dict(_base._capacity_vram_plan(profile, primary_device, secondary_device))
+
+def _capacity_vram_plan(profile: str, primary_device: str, secondary_device: str) -> dict:
+    """Public Capacity plan plus opt-in equal-card lab overlay."""
     try:
-        from .dual16g_lab import lab_enabled, pair_is_near_symmetric, requested_primary_fraction
-        if lab_enabled() and pair_is_near_symmetric(primary_device, secondary_device):
-            plan["mlp_primary_fraction"] = float(requested_primary_fraction())
-            plan["capacity_helper_heads"] = 28
+        return _lab_capacity_plan_from(
+            _base._capacity_vram_plan, profile, primary_device, secondary_device
+        )
     except Exception as exc:
-        # A requested lab configuration should fail loudly rather than silently
-        # claiming symmetric tuning. Ordinary rc6 behavior remains unaffected
-        # when the lab flag is not enabled.
         from .dual16g_lab import lab_enabled
         if lab_enabled():
             raise RuntimeError(f"H3VM dual16 lab Capacity policy failed: {exc}") from exc
-    return plan
+        raise
 
 
 def _base_config(config):
@@ -70,17 +70,8 @@ def _base_config(config):
     )
 
 
-def execution_kwargs(config):
+def _apply_lab_kwargs(kwargs, config, *, emit=True):
     mode = _normalize_mode(config.mode)
-    if mode == "DUAL_SYNC_ACCEL":
-        raise RuntimeError("Mode4 uses the dedicated Snapshot FullThrottle engine")
-    original_plan = _base._capacity_vram_plan
-    _base._capacity_vram_plan = _capacity_vram_plan
-    try:
-        kwargs = _base.execution_kwargs(_base_config(config))
-    finally:
-        _base._capacity_vram_plan = original_plan
-
     from .dual16g_lab import apply_execution_overrides
     tuned, report = apply_execution_overrides(
         kwargs,
@@ -88,7 +79,7 @@ def execution_kwargs(config):
         primary=config.primary_device,
         secondary=config.secondary_device,
     )
-    if report is not None:
+    if emit and report is not None:
         if report.get("active"):
             print(
                 "[H3VM DUAL16 LAB] symmetric policy ACTIVE | "
@@ -103,6 +94,55 @@ def execution_kwargs(config):
                 flush=True,
             )
     return tuned
+
+
+def execution_kwargs(config):
+    mode = _normalize_mode(config.mode)
+    if mode == "DUAL_SYNC_ACCEL":
+        raise RuntimeError("Mode4 uses the dedicated Snapshot FullThrottle engine")
+    original_plan = _base._capacity_vram_plan
+    _base._capacity_vram_plan = _capacity_vram_plan
+    try:
+        kwargs = _base.execution_kwargs(_base_config(config))
+    finally:
+        _base._capacity_vram_plan = original_plan
+    return _apply_lab_kwargs(kwargs, config, emit=True)
+
+
+@contextmanager
+def _dual16_base_policy_bridge(config):
+    """Temporarily inject the lab policy into core_adapter_base.adapt_model().
+
+    The prebuilt MODEL path calls functions defined in core_adapter_base directly,
+    so this narrow bridge keeps Master Loader and public Core behavior identical
+    during the lab without changing the frozen rc6 base module.
+    """
+    original_exec = _base.execution_kwargs
+    original_plan = _base._capacity_vram_plan
+
+    def plan_proxy(profile, primary_device, secondary_device):
+        return _lab_capacity_plan_from(
+            original_plan, profile, primary_device, secondary_device
+        )
+
+    def exec_proxy(base_config):
+        previous_plan = _base._capacity_vram_plan
+        _base._capacity_vram_plan = plan_proxy
+        try:
+            kwargs = original_exec(base_config)
+        finally:
+            _base._capacity_vram_plan = previous_plan
+        # Use the outer public config so device labels and lab semantics match
+        # the integrated path exactly.
+        return _apply_lab_kwargs(kwargs, config, emit=True)
+
+    _base._capacity_vram_plan = plan_proxy
+    _base.execution_kwargs = exec_proxy
+    try:
+        yield
+    finally:
+        _base.execution_kwargs = original_exec
+        _base._capacity_vram_plan = original_plan
 
 
 def _common_builder_kwargs(config):
@@ -191,12 +231,7 @@ def _prebuilt_snapshot_bridge(private):
 def adapt_model(model, *, config):
     mode = _normalize_mode(config.mode)
     if mode != "DUAL_SYNC_ACCEL":
-        with _filtered_prebuilt_replay():
-            # core_adapter_base calls its own execution_kwargs, so temporarily
-            # redirect its Capacity planner and then apply the symmetric runtime
-            # kwargs by using the public adapter path below where possible.
-            # Prebuilt model adaptation remains rc6-compatible; the dual16 lab is
-            # primarily validated through the integrated/Master path first.
+        with _CORE_BUILD_LOCK, _filtered_prebuilt_replay(), _dual16_base_policy_bridge(config):
             return _base.adapt_model(model, config=_base_config(config))
 
     import torch
