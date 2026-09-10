@@ -78,7 +78,7 @@ def test_mode4_asset_route_uses_stock_full_throttle_builder():
         )
         assert out == "mode4-model"
         assert calls["unet_name"] == "clean_h3.safetensors"
-        assert calls["secondary_blocks_target"] == 22
+        assert calls["secondary_blocks_target"] == 25
         assert calls["expected_steps"] == 20
         assert calls["predictor_mode"] == "linear"
         assert calls["predictor_beta"] == 0.75
@@ -115,6 +115,33 @@ def test_mode4_auto_falls_back_when_comfy_global_pinned_is_enabled():
             sys.modules["comfy.cli_args"] = old_cli
 
 
+def test_mode4_windows_always_uses_pageable_h3vm_mailbox():
+    fake_comfy = ModuleType("comfy")
+    fake_cli = ModuleType("comfy.cli_args")
+    fake_cli.args = SimpleNamespace(disable_pinned_memory=True)
+    old_comfy = sys.modules.get("comfy")
+    old_cli = sys.modules.get("comfy.cli_args")
+    old_platform = core.sys.platform
+    sys.modules["comfy"] = fake_comfy
+    sys.modules["comfy.cli_args"] = fake_cli
+    core.sys.platform = "win32"
+    try:
+        policy = core._mode4_fullthrottle_host_policy()
+        assert policy["safe_profile"] is True
+        assert policy["host_feeder"] == "pageable"
+        assert policy["pinned_mailbox_mb"] == 0
+        assert policy["policy"] == "windows_multigpu_pageable_guard"
+    finally:
+        core.sys.platform = old_platform
+        if old_comfy is None:
+            sys.modules.pop("comfy", None)
+        else:
+            sys.modules["comfy"] = old_comfy
+        if old_cli is None:
+            sys.modules.pop("comfy.cli_args", None)
+        else:
+            sys.modules["comfy.cli_args"] = old_cli
+
 
 if __name__ == "__main__":
     test_static_mode_policy()
@@ -122,4 +149,5 @@ if __name__ == "__main__":
     test_runtime_bridge_rebinds_existing_capacity_loader()
     test_mode4_asset_route_uses_stock_full_throttle_builder()
     test_mode4_auto_falls_back_when_comfy_global_pinned_is_enabled()
+    test_mode4_windows_always_uses_pageable_h3vm_mailbox()
     print("H3VM Core contract tests passed")
