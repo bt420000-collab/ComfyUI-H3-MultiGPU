@@ -4,7 +4,7 @@
 
 MiniMax H3 多卡加载与显存调度节点。目标不是提供一条固定工作流，而是把 H3 的模型加载、Turbo LoRA、普通 Style/角色 LoRA、步数、时长、分辨率、GPU 模式和 Video VAE 调度收进一个统一入口，方便接入任意 H3 工作流。
 
-> 当前版本：v0.20.0-rc5
+> 当前版本：v0.20.0-rc6
 
 ## 两种使用形态
 
@@ -115,6 +115,8 @@ H3VM **不要求两张显卡型号不同**。两张 RTX 3080、两张 RTX 5060 T
 
 双卡模式默认选择 `gpu:0` + `gpu:1`。这里的编号是 PyTorch 当前进程看到的**逻辑编号**。如果启动脚本设置了 `CUDA_VISIBLE_DEVICES`，物理卡会被过滤并重新编号。例如只设置 `CUDA_VISIBLE_DEVICES=0` 时，即使机器实际安装了两张卡，当前 ComfyUI 进程也只会看到一个 `cuda:0`，双卡模式无法工作；设置为 `CUDA_VISIBLE_DEVICES=0,1` 后再重启 ComfyUI，进程才会看到两个逻辑 CUDA 设备。
 
+近期 Windows ComfyUI 版本可能为了规避 NVIDIA/CUDA 多 GPU 问题，默认只向当前进程暴露 GPU0。此时可使用 `--cuda-device all` 启动 ComfyUI，并确认启动日志同时列出 `cuda:0` 和 `cuda:1`。
+
 新版 preflight 在失败时会直接打印：
 
 - `PyTorch-visible CUDA devices`
@@ -123,6 +125,21 @@ H3VM **不要求两张显卡型号不同**。两张 RTX 3080、两张 RTX 5060 T
 - 失败时 best-effort 的 `nvidia-smi` 物理 GPU 列表
 
 成功时控制台会出现 `[H3VM GPU PREFLIGHT]`，并列出实际解析出的 primary / secondary。这样可以区分“机器有两张卡”和“当前 ComfyUI 只看见一张卡”。
+
+### rc6 Windows comfy-kitchen DLPack Guard
+
+Windows 多卡环境中，量化权重可能已经位于 `cuda:1`，但当前 Python 线程的 CUDA current device 仍停在 `cuda:0`。comfy-kitchen CUDA backend 通过 DLPack 导出这类张量时，PyTorch 会拒绝 device index 不一致的导出。
+
+rc6 会在 Windows + 至少两张可见 CUDA GPU + comfy-kitchen CUDA backend 条件下安装窄范围兼容 Guard，在 DLPack 导出前切换到 tensor 所属 CUDA device。该 Guard 只补丁 comfy-kitchen 的 DLPack helper，不改 Quiet / Capacity / Mode4 调度算法；如需排障可设置 `H3VM_DISABLE_CK_MULTIGPU_GUARD=1` 关闭。
+
+典型已修复报错：
+
+```text
+BufferError: Can't export tensors on a different CUDA device index.
+Expected: 1. Current device: 0.
+```
+
+完整说明见 `RC6_WINDOWS_MULTIGPU_COMPAT.md`。此 Guard 不代表 H3VM 已解决所有 Windows/NVIDIA 的 host-memory、DynamicVRAM 或驱动级多卡问题。
 
 ## 推荐测试顺序
 

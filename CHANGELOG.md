@@ -2,11 +2,17 @@
 
 ## Unreleased
 
-- Fixed dual-GPU preflight so explicit `gpu:N` / `cuda:N` selections map to distinct PyTorch-logical CUDA devices before falling back to ComfyUI's resolver.
-- Identical GPU model names are explicitly supported; for example, two RTX 3080 cards are valid when both are visible to the current ComfyUI/Python process.
-- When fewer than two CUDA devices are visible, H3VM now reports `torch.cuda.device_count()` context, `CUDA_VISIBLE_DEVICES`, `NVIDIA_VISIBLE_DEVICES`, visible GPU names/VRAM, and a best-effort `nvidia-smi` physical inventory instead of the old generic “requires at least two CUDA GPUs” error.
-- Successful dual-GPU preflight now logs the resolved logical devices once, making visibility masks and same-model pairs easy to verify from the console.
-- The heavy proven runtime in `loader_base.py` remains untouched; the compatibility fix is installed before Core/loader wrappers bind runtime helpers.
+## v0.20.0-rc6
+
+- Promoted the dual-GPU visibility/preflight work from `Unreleased`: explicit `gpu:N` / `cuda:N` selections now resolve as distinct PyTorch-logical CUDA devices before falling back to ComfyUI's resolver.
+- Identical GPU model names are explicitly supported; for example, two RTX 3080 cards or two RTX 5060 Ti cards are valid when both are visible to the current ComfyUI/Python process.
+- When fewer than two CUDA devices are visible, H3VM reports `torch.cuda.device_count()`, `CUDA_VISIBLE_DEVICES`, `NVIDIA_VISIBLE_DEVICES`, visible GPU names/VRAM, and a best-effort `nvidia-smi` physical inventory instead of only the generic “requires at least two CUDA GPUs” error.
+- Added a narrow Windows multi-GPU comfy-kitchen DLPack device-context guard. When a quantized tensor lives on `cuda:1` while the thread current device is still `cuda:0`, H3VM switches the current CUDA device before comfy-kitchen exports the tensor through DLPack.
+- This fixes the observed `BufferError: Can't export tensors on a different CUDA device index. Expected: 1. Current device: 0.` path while loading secondary-GPU ConvRot INT8 weights.
+- The comfy-kitchen guard is Windows-only, requires at least two PyTorch-visible CUDA devices, patches only `comfy_kitchen.backends.cuda._wrap_for_dlpack`, is idempotent/best-effort, and can be disabled with `H3VM_DISABLE_CK_MULTIGPU_GUARD=1`.
+- Added a lightweight contract test for the cuda:0 -> cuda:1 -> cuda:0 context-switch behavior and wired it into CI.
+- No Quiet, Capacity, or Mode4 scheduling algorithm was rewritten for rc6; the compatibility layer is installed before the runtime bridge.
+- On recent Windows ComfyUI builds that intentionally expose only GPU0 by default, start ComfyUI with `--cuda-device all` so H3VM can see both logical CUDA devices. This is separate from the comfy-kitchen DLPack guard.
 
 ## v0.20.0-rc5
 

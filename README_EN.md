@@ -6,7 +6,7 @@ H3VM is a multi-GPU loading, execution, and VRAM scheduling layer for **MiniMax 
 
 The project is not tied to one fixed workflow. Its goal is to make H3 easier to run on heterogeneous multi-GPU systems by providing both an integrated standalone controller and a reusable `MODEL -> MODEL` execution engine that can be inserted into larger H3 pipelines.
 
-> Current version: **v0.20.0-rc5**
+> Current version: **v0.20.0-rc6**
 
 ## Two ways to use H3VM
 
@@ -215,6 +215,8 @@ H3VM does **not** require two different GPU model names. Two RTX 3080 cards, two
 
 Dual-GPU modes normally select `gpu:0` + `gpu:1`. These are PyTorch-visible logical indices. If the startup environment sets `CUDA_VISIBLE_DEVICES`, physical GPUs can be filtered and renumbered. For example, `CUDA_VISIBLE_DEVICES=0` exposes only one logical `cuda:0` even if the machine physically contains two GPUs. Expose both target cards, for example with `CUDA_VISIBLE_DEVICES=0,1`, and restart ComfyUI before using a dual-GPU mode.
 
+Recent Windows ComfyUI builds may intentionally expose only GPU0 by default as a workaround for NVIDIA/CUDA multi-GPU issues. Start ComfyUI with `--cuda-device all` when needed and confirm that both `cuda:0` and `cuda:1` appear in the startup log.
+
 The improved preflight reports:
 
 - the number of PyTorch-visible CUDA devices
@@ -223,6 +225,21 @@ The improved preflight reports:
 - a best-effort physical `nvidia-smi` inventory when preflight fails
 
 On success, the console prints `[H3VM GPU PREFLIGHT]` with the resolved primary and secondary devices. This makes it clear whether the machine lacks a second GPU or the current process is simply hiding it.
+
+### rc6 Windows comfy-kitchen DLPack guard
+
+On Windows multi-GPU systems, a quantized tensor can already live on `cuda:1` while the Python thread current CUDA device is still `cuda:0`. comfy-kitchen's CUDA backend exports tensors through DLPack, and PyTorch rejects that export when the current device index does not match the tensor device.
+
+rc6 installs a narrow compatibility guard only when Windows, at least two visible CUDA devices, and the comfy-kitchen CUDA backend are all present. Before DLPack export, H3VM switches the current CUDA device to the tensor-owning device. The guard patches only comfy-kitchen's private DLPack helper and does not rewrite Quiet, Capacity, or Mode4 scheduling. Set `H3VM_DISABLE_CK_MULTIGPU_GUARD=1` to opt out for troubleshooting.
+
+Typical fixed error:
+
+```text
+BufferError: Can't export tensors on a different CUDA device index.
+Expected: 1. Current device: 0.
+```
+
+See `RC6_WINDOWS_MULTIGPU_COMPAT.md` for details. This guard does not claim to fix unrelated Windows/NVIDIA host-memory, DynamicVRAM, or driver-level multi-GPU failures.
 
 ## Recommended first test
 

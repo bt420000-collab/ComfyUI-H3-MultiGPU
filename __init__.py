@@ -1,8 +1,9 @@
-"""H3VM v0.20.0-rc5 public product wrapper.
+"""H3VM v0.20.0-rc6 public product wrapper.
 
-The frozen rc1 runtime lives in base_runtime.py.  rc5 adds a public MODEL->MODEL
-Core engine, mode-independent ordinary LoRA stack, and built-in Stock-H3 Mode4
-without rewriting the proven Quiet/Capacity algorithms.
+The frozen rc1 runtime lives in base_runtime.py. rc5 added the public MODEL->MODEL
+Core engine, mode-independent ordinary LoRA stack, and built-in Stock-H3 Mode4.
+rc6 adds Windows multi-GPU compatibility guards without rewriting the proven
+Quiet/Capacity/Mode4 execution algorithms.
 """
 from .base_runtime import *  # noqa: F401,F403
 from . import base_runtime as _base
@@ -176,4 +177,4 @@ if H3VM_SHOW_LAB_NODES:
     NODE_CLASS_MAPPINGS.update(LAB_NODE_CLASS_MAPPINGS)
     NODE_DISPLAY_NAME_MAPPINGS.update(LAB_NODE_DISPLAY_NAME_MAPPINGS)
 
-print("[H3VM v0.20.0-rc5] Master Loader + public MODEL->MODEL Core engine ready", flush=True)
+print("[H3VM v0.20.0-rc6] Master Loader + public MODEL->MODEL Core + Windows multi-GPU compatibility guard ready", flush=True)
