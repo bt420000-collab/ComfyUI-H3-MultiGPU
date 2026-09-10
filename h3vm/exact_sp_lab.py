@@ -33,6 +33,15 @@ class ExactSPPlan:
         return self.head_counts[1]
 
 
+def _sequence_partition(seq_len: int, primary_fraction: float) -> SequencePartition:
+    # Python round() uses bankers rounding, so 101 * 0.5 would otherwise become
+    # 50/51. Symmetric H3VM plans deliberately assign the odd remainder to rank0
+    # for deterministic ownership across platforms and Python versions.
+    if abs(float(primary_fraction) - 0.5) <= 1e-12:
+        return SequencePartition.balanced(int(seq_len), 2)
+    return SequencePartition.dual_ratio(int(seq_len), float(primary_fraction))
+
+
 def estimate_exchange_bytes(*, seq_len: int, hidden_dim: int, heads: int,
                             head_dim: int, element_size: int,
                             primary_fraction: float) -> tuple[int, int, int]:
@@ -53,7 +62,7 @@ def estimate_exchange_bytes(*, seq_len: int, hidden_dim: int, heads: int,
     if min(seq_len, hidden_dim, heads, head_dim, element_size) <= 0:
         raise ValueError("all dimensions must be positive")
 
-    sequence = SequencePartition.dual_ratio(seq_len, primary_fraction)
+    sequence = _sequence_partition(seq_len, primary_fraction)
     p_tokens, s_tokens = sequence.counts
 
     # Each direction sends its local hidden rows exactly once.
@@ -77,7 +86,7 @@ def build_exact_sp_plan(pair: PairProfile, *, seq_len: int, hidden_dim: int,
         manual_ratio=manual_ratio,
         total_heads=int(heads),
     )
-    sequence = SequencePartition.dual_ratio(seq_len, runtime.primary_fraction)
+    sequence = _sequence_partition(seq_len, runtime.primary_fraction)
     head_counts = (runtime.attention_primary_heads, runtime.attention_secondary_heads)
     hb, ab, total = estimate_exchange_bytes(
         seq_len=seq_len,
