@@ -61,26 +61,68 @@ def execution_kwargs(config):
         _base._capacity_vram_plan = original_plan
 
 
-def _common_builder_kwargs(config):
-    return dict(
-        primary_device=str(config.primary_device), secondary_device=str(config.secondary_device),
-        stripe_size=50, expected_steps=max(1, int(config.expected_steps)), safe_profile=True,
-        hard_cleanup_after_sample=False, telemetry=bool(config.telemetry),
-    )
+def _streaming_host_policy():
+    """Respect ComfyUI's global pinned-memory policy for exact streaming modes.
 
-
-def _mode4_fullthrottle_host_policy():
+    The public runtime may use a small explicit pinned runway only when ComfyUI
+    itself has disabled global pinned memory. Otherwise H3VM leaves host pinning
+    ownership to ComfyUI and keeps its own helper path pageable.
+    """
     pinned_disabled = True
     try:
         from comfy.cli_args import args
         pinned_disabled = bool(getattr(args, "disable_pinned_memory", False))
     except Exception:
-        pass
+        pinned_disabled = True
+    return {
+        "safe_profile": bool(pinned_disabled),
+        "explicit_pinned_allowed": bool(pinned_disabled),
+        "policy": "h3vm_bounded_pinned" if pinned_disabled else "comfy_global_pinned+pageable_h3vm",
+    }
+
+
+def _common_builder_kwargs(config):
+    host = _streaming_host_policy()
+    print(
+        f"[H3VM CORE] streaming host policy | {host['policy']} | safe_profile={host['safe_profile']}",
+        flush=True,
+    )
+    return dict(
+        primary_device=str(config.primary_device), secondary_device=str(config.secondary_device),
+        stripe_size=50, expected_steps=max(1, int(config.expected_steps)), safe_profile=bool(host["safe_profile"]),
+        hard_cleanup_after_sample=False, telemetry=bool(config.telemetry),
+    )
+
+
+def _mode4_fullthrottle_host_policy():
+    """Choose a host feeder that is safe on native Windows multi-GPU.
+
+    The locally validated dual-16G path keeps Mode4 pageable on Windows rather
+    than silently re-enabling an explicit pinned mailbox after ComfyUI disabled
+    global pinned memory. Non-Windows retains the historical bounded-pinned path
+    when global pinning is disabled.
+    """
+    pinned_disabled = True
+    try:
+        from comfy.cli_args import args
+        pinned_disabled = bool(getattr(args, "disable_pinned_memory", False))
+    except Exception:
+        pinned_disabled = True
+
+    if sys.platform == "win32":
+        return dict(
+            safe_profile=bool(pinned_disabled), host_feeder="pageable", pinned_mailbox_mb=0,
+            policy="windows_multigpu_pageable_guard",
+        )
     if pinned_disabled:
-        return dict(safe_profile=True, host_feeder="bounded_pinned", pinned_mailbox_mb=1024,
-                    policy="h3vm_bounded_pinned")
-    return dict(safe_profile=False, host_feeder="pageable", pinned_mailbox_mb=0,
-                policy="comfy_global_pinned+pageable_h3vm")
+        return dict(
+            safe_profile=True, host_feeder="bounded_pinned", pinned_mailbox_mb=1024,
+            policy="h3vm_bounded_pinned",
+        )
+    return dict(
+        safe_profile=False, host_feeder="pageable", pinned_mailbox_mb=0,
+        policy="comfy_global_pinned+pageable_h3vm",
+    )
 
 
 def build_asset_model(*, unet_name, turbo_lora_name, turbo_strength=1.0,
@@ -90,11 +132,11 @@ def build_asset_model(*, unet_name, turbo_lora_name, turbo_strength=1.0,
     print(f"[H3VM CORE] asset model path | mode={mode}", flush=True)
     if mode == "DUAL_SYNC_ACCEL":
         hp = _mode4_fullthrottle_host_policy()
-        print("[H3VM CORE] Mode4 Stock H3 FullThrottle | Dev9.4 22/28 RAM2G PREDICT075 | Turbo ignored", flush=True)
+        print("[H3VM CORE] Mode4 Stock H3 FullThrottle | Dev9.4 25/25 RAM2G PREDICT075 | Turbo ignored", flush=True)
         print(f"[H3VM CORE] Mode4 host policy | {hp['policy']} | feeder={hp['host_feeder']} pinned_cap={hp['pinned_mailbox_mb']}MiB", flush=True)
         return build_h3_snapshot_islands_full_throttle(
             unet_name=str(unet_name), primary_device=str(config.primary_device), secondary_device=str(config.secondary_device),
-            secondary_blocks_target=22, primary_reserve_gb=2.5, secondary_reserve_gb=1.5,
+            secondary_blocks_target=25, primary_reserve_gb=2.5, secondary_reserve_gb=1.5,
             secondary_overcommit_mb=1024, safe_profile=bool(hp["safe_profile"]), expected_steps=20,
             refresh_interval=0, exact_last_step=True, predictor_mode="linear", predictor_beta=0.75,
             prefix_prefetch=True, tail_prefetch=True, launch_tail_before_stage=True,
@@ -175,7 +217,7 @@ def adapt_model(model, *, config):
     with _CORE_BUILD_LOCK, _prebuilt_snapshot_bridge(private):
         out = build_h3_snapshot_islands_full_throttle(
             unet_name="<prebuilt-model>", primary_device=str(config.primary_device), secondary_device=str(config.secondary_device),
-            secondary_blocks_target=22, primary_reserve_gb=2.5, secondary_reserve_gb=1.5,
+            secondary_blocks_target=25, primary_reserve_gb=2.5, secondary_reserve_gb=1.5,
             secondary_overcommit_mb=1024, safe_profile=bool(hp["safe_profile"]),
             expected_steps=max(1, int(config.expected_steps)), refresh_interval=0, exact_last_step=True,
             predictor_mode="linear", predictor_beta=0.75, prefix_prefetch=True, tail_prefetch=True,
