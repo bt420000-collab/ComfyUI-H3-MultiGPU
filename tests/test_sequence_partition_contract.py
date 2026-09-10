@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 
 
@@ -10,6 +11,7 @@ SPEC = importlib.util.spec_from_file_location(
     ROOT / "h3vm" / "sequence_partition.py",
 )
 MOD = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MOD
 SPEC.loader.exec_module(MOD)
 SequencePartition = MOD.SequencePartition
 
