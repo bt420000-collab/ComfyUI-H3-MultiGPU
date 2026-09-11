@@ -20,9 +20,7 @@ jobs:
           python-version: '3.12'
       - name: Compile H3 VRAM Master public runtime
         run: |
-          python -m py_compile __init__.py base_runtime.py h3vm/__init__.py h3vm/core_adapter.py h3vm/core_adapter_base.py h3vm/gpu_preflight.py h3vm/comfy_kitchen_multigpu.py h3vm/loader.py h3vm/loader_base.py h3vm/master_console.py h3vm/style_lora.py h3vm/sequence_partition.py h3vm/quant_shard.py h3vm/compute_planner.py h3vm/exact_sp_lab.py h3vm/vram_master_fusion.py h3vm/capacity_quantized_qkv.py scripts/qkv_quantized_parity.py scripts/dual_gpu_probe.py scripts/vram_master_plan_probe.py
-      # Run lightweight assert-based contracts as scripts. This avoids pytest
-      # treating the ComfyUI custom-node root __init__.py as a top-level package.
+          python -m py_compile __init__.py base_runtime.py h3vm/__init__.py h3vm/core_adapter.py h3vm/core_adapter_base.py h3vm/gpu_preflight.py h3vm/comfy_kitchen_multigpu.py h3vm/loader.py h3vm/loader_base.py h3vm/master_console.py h3vm/style_lora.py h3vm/sequence_partition.py h3vm/quant_shard.py h3vm/compute_planner.py h3vm/exact_sp_lab.py h3vm/exact_sp_exchange.py h3vm/vram_master_fusion.py h3vm/capacity_quantized_qkv.py h3vm/relay_packet.py h3vm/attention_relay_packet.py h3vm/segmented_relay.py scripts/qkv_quantized_parity.py scripts/dual_gpu_probe.py scripts/vram_master_plan_probe.py scripts/relay_packet_benchmark.py scripts/exact_sp_exchange_probe.py
       - name: Run public runtime contracts directly
         env:
           PYTHONPATH: .
@@ -36,7 +34,11 @@ jobs:
           python tests/test_quant_shard_contract.py
           python tests/test_compute_planner_contract.py
           python tests/test_exact_sp_lab_contract.py
+          python tests/test_exact_sp_exchange_contract.py
           python tests/test_capacity_quantized_qkv_contract.py
+          python tests/test_relay_packet_contract.py
+          python tests/test_segmented_relay_contract.py
+          python tests/test_relay_overlay_contract.py
           python tests/test_brand_contract.py
           python tests/test_fusion_docs_contract.py
           python tests/test_product_name_contract.py
@@ -77,6 +79,13 @@ jobs:
 
           当前融合分支：lab/h3-vram-master-fusion-v1
           H3VM = H3 VRAM Master
+
+          当前融合技术：
+          - 双16G Mode4 25/25 硬件感知规划
+          - Capacity Quantized-QKV 原生切片 + dense fail-safe
+          - Host Attention 六路传输合并为单 packet relay
+          - bounded pinned 双缓冲 segmented relay（失败自动退回旧路径）
+          - Exact-SP sequence/head exchange fabric 与真机 parity probe
           EOF
       - name: Upload install package
         if: github.event_name != 'pull_request'
