@@ -1,186 +1,317 @@
-# H3VM Multi-GPU Loader for ComfyUI
+# H3 VRAM Master for ComfyUI
+
+**H3VM = H3 VRAM Master**
 
 **中文** | [English](README_EN.md)
 
-MiniMax H3 多卡加载与显存调度节点。目标不是提供一条固定工作流，而是把 H3 的模型加载、Turbo LoRA、普通 Style/角色 LoRA、步数、时长、分辨率、GPU 模式和 Video VAE 调度收进一个统一入口，方便接入任意 H3 工作流。
+H3 VRAM Master 是为 **MiniMax H3 本地生成**设计的显存与多显卡计算管理器。
 
-> 当前版本：v0.20.0-rc6
+它不是单纯的“双卡 Loader”，也不是为了让第二张显卡亮起来而存在。
 
-## 两种使用形态
+它真正要解决的是：
 
-### 1. H3VM Multi-GPU Loader｜H3多卡加载器
+> **让整台电脑的 GPU、显存和系统内存一起服务 H3，并根据当前硬件与任务，选择最合适的执行方式。**
 
-独立使用的一体化主控。继续负责模型、Turbo、Steps、Prompt、分辨率、Seed 等便捷生成控制，适合直接生成和快速 A/B。
+普通工作流主要负责“生成什么”。
 
-### 2. H3VM Core｜多卡执行引擎
+H3VM 负责另一件事：
 
-用于接入复杂主工作流，接口边界是 `MODEL -> H3VM execution -> MODEL`。主工作流先完成 Ref2VA/FL2VA、Turbo、普通 LoRA、Sigma/Scheduler 等业务路由，再把最终 MODEL 交给 Core。Core 只负责 GPU 模式、显存/执行调度和 telemetry，不修改 Prompt、Seed、分辨率、Sampler、Sigmas 或实际采样步数。
+> **这个模型应该怎样放、怎样拆、怎样传、怎样让一张或多张显卡把它跑完。**
 
-当前 Generic Core 已支持 clean H3 和普通 ModelPatcher weight patches（常见 `LoraLoaderModelOnly`）。runtime injections、object/hook/weight-wrapper patches 仍 fail-closed，防止 GPU0/GPU1 计算不同模型。
+### 一句话介绍
+
+**你负责选镜头，H3VM 负责安排显卡。**
+
+---
+
+## 为什么需要 H3VM？
+
+本地跑 H3 最大的问题，很多时候不是“没有算力”，而是**算力没有被有效组织起来**。
+
+常见情况包括：
+
+- 一张显卡满载，另一张显卡几乎闲着；
+- 两张卡显存加起来很多，但模型还是只能塞在一张卡里；
+- 为了双卡而双卡，数据搬运反而比计算更慢；
+- Windows 没有 NVLink / CUDA P2P，传统多卡路线直接失效；
+- 高分辨率时显存不够，低分辨率时第二张卡又被浪费；
+- 双 16GB 与 16GB + 8GB 明明是完全不同的机器，却被迫套同一组参数。
+
+H3VM 不要求你的两张显卡必须完全相同，也不把 NVLink 当作前提。
+
+它更关心一件事：
+
+> **你现在这台机器，怎样跑才最划算。**
+
+---
+
+## 五种产品模式
+
+用户界面优先表达“你想得到什么”，技术名留给日志与高级信息。
+
+| 产品模式 | 适合什么 | 内部技术名 |
+|---|---|---|
+| **单卡模式** | 最兼容、最清晰的基线 | `SINGLE_GPU` |
+| **双卡协同** | 日常使用，两张卡稳定分担计算 | `DUAL_QUIET` |
+| **双卡扩容** | 单卡显存不够，优先解决“跑不下” | `DUAL_CAPACITY` |
+| **双卡极速** | 快速试镜、批量生产，优先追求生成速度 | `DUAL_SYNC_ACCEL / Mode4` |
+| **双卡原生** | 两张卡共同完成精确模型计算，不依赖预测近似 | `DUAL_EXACT_SP` |
+
+### 单卡模式
+
+只使用一张显卡。
+
+适合第一次安装、排查工作流问题、建立质量/速度/显存基线。
+
+### 双卡协同
+
+日常推荐路线。
+
+两张显卡共同承担 H3 的部分计算，目标是在速度、显存压力与稳定性之间取得平衡。
+
+它不是为了让 GPU1 看起来更忙，而是为了真正缩短关键路径或减轻主卡压力。
+
+### 双卡扩容
+
+目标不是“最快”，而是：
+
+> **原来单卡跑不了的任务，现在能跑。**
+
+H3VM 会通过动态显存管理、RAM backing、量化分片、QKV / MLP 分工等方式降低单卡峰值显存。
+
+适合更高分辨率、更长视频和单卡容易 OOM 的场景。
+
+### 双卡极速
+
+速度优先路线。
+
+主卡和副卡尽可能错位推进不同阶段，减少彼此等待。
+
+简单理解：
+
+> 主卡正在算现在，副卡已经提前准备下一步。
+
+这条路线允许预测与近似计算，更适合快速试镜、批量生产和大量候选镜头。
+
+### 双卡原生
+
+两张显卡一起认真把同一道题算完。
+
+它把当前模型计算精确拆给两张卡，再重新组合继续下一层，不依赖 Mode4 的预测近似。
+
+这是 H3VM 的 Exact-SP / 原生双卡路线，目前仍以严格正确性和真实 H3 workload 验证为晋升前提。
+
+---
+
+## 没有 NVLink，也可以双卡
+
+H3VM 把普通消费级 Windows 双卡当作一等公民。
+
+如果两张显卡支持直接通信，就使用更直接的路径。
+
+如果不能 P2P，就通过系统内存进行 Host/RAM Relay，并根据实际硬件与运行环境选择更合适的中转策略。
+
+目标不是让用户研究 PCIe 拓扑，而是：
+
+> **能直连就直连，不能直连就绕路，但尽量别堵车。**
+
+---
+
+## H3VM 不只管理“多卡”，也管理显存
+
+H3VM 会逐步统一管理：
+
+- 模型什么时候进入显存；
+- 哪些权重值得继续驻留；
+- 哪些数据可以暂存在系统内存；
+- 主卡与副卡分别保留多少运行空间；
+- 量化权重怎样只计算当前需要的部分；
+- 两张卡之间的数据怎样交换；
+- Video VAE 如何分担；
+- 哪些优化值得启用，哪些应该自动回退。
+
+所以它解决的不只是：
+
+> “怎么用两张卡？”
+
+而是：
+
+> **“整台电脑的 GPU 和内存，怎样一起服务 H3？”**
+
+---
+
+## 两种使用方式
+
+### 1. H3 VRAM Master Loader
+
+一体化主控。
+
+适合希望直接使用 H3VM 完整能力的用户，可集中管理模型、运行模式、步数、分辨率、Seed、Sampler、Video VAE 等常用参数。
+
+### 2. H3 VRAM Master Core
+
+用于已有复杂工作流的快速接入。
+
+接口保持尽量窄：
+
+```text
+原 MODEL
+   |
+   v
+H3VM Core
+   |
+   v
+原工作流
+```
+
+Prompt、Seed、分辨率、Sampler、Sigmas 和实际采样步数仍由原工作流负责。
+
+也就是说：
+
+> **不需要为了多卡重做整个工作流。**
+
+---
+
+## 智能调度，而不是永久手调比例
+
+H3VM 的长期方向不是越来越多的 50/50、56/44、28/22 参数表，而是一个越来越懂硬件的 Planner。
+
+Planner 会逐步综合：
+
+- 两张卡的显存；
+- GPU 计算规模；
+- 两张卡是否接近对称；
+- 是否支持 CUDA P2P；
+- Host Relay 实测速度；
+- 当前模型与量化格式；
+- 分辨率、时长与步数；
+- 当前目标是速度、容量还是精确性。
+
+然后决定模型与计算怎样分工。
+
+我们的方向不是让用户学会调多卡，而是：
+
+> **让 H3VM 学会用户的电脑。**
+
+---
+
+## 开发总指导思想
+
+H3VM 不追求收集最多的多 GPU 技术名词。
+
+任何新技术进入主线，都至少应该带来一种真实、可测量的正收益：
+
+1. **速度收益**：更短的实际 wall time；
+2. **容量收益**：单卡 OOM，多卡能够完成；
+3. **质量/精确性收益**：相同成本下更可靠；
+4. **兼容性收益**：更多普通硬件能够工作；
+5. **使用成本收益**：更少改工作流、更少手调、更容易理解和复现。
+
+**GPU1 更忙，不等于优化成功。**
+
+完整的产品与开发总纲见：
+
+> [H3VM_PRODUCT_CHARTER.md](H3VM_PRODUCT_CHARTER.md)
+
+这份总纲是后续开发的长期基线。技术实现可以替换，产品目标不能每天漂移。
+
+---
+
+## 技术术语与产品人话
+
+H3VM 会尽量把研究术语留在日志和高级信息里。
+
+例如：
+
+- `Host Relay` = **内存中转**
+- `P2P` = **显卡直连**
+- `Compute Planner` = **智能调度**
+- `DynamicVRAM` = **动态显存管理**
+- `Quantized QKV Shard` = **量化分片计算**
+- `Sequence Partition` = **序列分工**
+- `Exact-SP` = **双卡原生 / 精确并行**
+- `Snapshot / Predictor` = **预测加速**
+- `Telemetry` = **性能监控**
+- `Fallback` = **自动回退**
+
+用户不需要先读论文，才能知道应该选哪个模式。
+
+---
+
+## 安装
+
+1. 将插件目录放入：
+
+```text
+ComfyUI/custom_nodes/ComfyUI-H3-VRAM-Master
+```
+
+2. 安装 `requirements.txt` 中尚未具备的依赖。
+3. 确保目标双卡都对当前 ComfyUI / Python 进程可见。
+4. 重启 ComfyUI。
+
+升级时建议先移走旧的 `ComfyUI-H3-MultiGPU` / 旧 H3VM 插件目录，避免重复节点和运行时桥冲突。
+
+Windows 下如果 ComfyUI 只暴露一张卡，请先确认当前进程是否真的同时看到 `cuda:0` 与 `cuda:1`。
+
+---
+
+## 推荐测试顺序
+
+第一次测试时，尽量保持 Prompt、Seed、模型、LoRA、分辨率一致，只切运行模式。
+
+建议顺序：
+
+1. **单卡模式**：建立基线；
+2. **双卡协同**：看日常双卡是否获得正收益；
+3. **双卡扩容**：在单卡接近 OOM 或已经 OOM 时验证；
+4. **双卡极速**：单独比较速度与画面稳定性；
+5. **双卡原生**：按当前 Preview / 验证说明测试精确双卡路径。
+
+对性能模式，主要看 **wall time 与主卡关键路径**。
+
+对扩容模式，成功标准首先是：
+
+> **单卡跑不了，多卡能完成。**
+
+---
+
+## 项目边界
+
+公开 H3VM 聚焦底层执行：
+
+- VRAM 管理
+- 多 GPU 计算
+- Planner
+- Host Relay / transport
+- Attention / QKV / MLP 分片
+- Capacity
+- Mode4
+- Exact-SP
+- Dual Video VAE
+- 性能监控
+
+上层生产系统的任务队列、Worker Lease、项目生命周期、P1/P2/P3 调度、Artifact 路由等不属于 H3VM 公共运行时。
+
+H3VM 应保持为一个可以被不同工作流和生产系统调用的底层执行层。
+
+---
+
+## 开发路线
+
+技术路线与晋升规则见：
+
+- [H3VM_PRODUCT_CHARTER.md](H3VM_PRODUCT_CHARTER.md) — 产品与开发总纲
+- [H3VM_FUSION_ROADMAP.md](H3VM_FUSION_ROADMAP.md) — 运行时融合路线
+- [BRAND_H3_VRAM_MASTER.md](BRAND_H3_VRAM_MASTER.md) — 产品命名与公开边界
+- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) — 第三方技术与许可证说明
+
+---
 
 ## 作者 / Author
 
 - GitHub: `bt420000-collab`
 - Bilibili: https://space.bilibili.com/16826253
-
-
-## 核心节点
-
-`H3VM Multi-GPU Loader｜H3多卡加载器`
-
-常用设置都集中在一个节点中：
-
-- H3 diffusion model
-- Turbo LoRA 与强度
-- 4 / 6 / 8 步
-- 时长（秒，可自由填写）
-- 画面比例与常用分辨率预设
-- Seed
-- GPU 运行模式
-- 双卡扩显存实验档位
-- Prompt（放在最下方，默认折叠，展开后为大输入框）
-
-## GPU 模式
-
-### 单卡｜标准模式
-
-只使用主 GPU。适合作为质量、性能和显存基线。
-
-### 双卡协同｜日常推荐
-
-保留当前成熟的双卡协同计算与 Dual Video VAE。主要价值是分担负载、降低单卡持续满载和风扇压力；在当前测试机上也有小幅性能收益。
-
-### 双卡扩显存｜高清模式
-
-以“单卡 OOM 时仍能完成推理”为第一目标。通过 RAM backing、QKV head shard、MLP token shard、micro-chunk 和动态显存驻留降低单卡峰值显存。
-
-当前实测建议使用 **8 步**。在当前 16GB + 8GB 测试机上，4 步 Capacity 曾出现明显音质下降；INT8 Attention 与官方 optimized/Sage Attention A/B 音质一致，因此当前不把问题归因于 Attention kernel。
-
-### 双卡满血｜原版20步
-
-模式 4 现已接入历史 Dev9.4 Stock H3 FullThrottle 路径。该模式忽略 Turbo LoRA 与 4/6/8 步预设，固定使用原版 H3 `res_multistep` + 20 steps，不应用 Turbo SigmaShift；普通 Style / 角色 LoRA Stack 仍然生效。双卡执行使用 22/28 Snapshot Islands、2GB RAM backing 与 linear predictor 0.75。
-
-注意：这里的“原版”指 **原版 H3 权重/采样契约**；Dev9.4 FullThrottle 执行器本身使用 stale/predicted boundary snapshot，是实验性近似双卡推理，并非逐层严格同步的 exact execution。
-
-## 双卡扩显存档位
-
-该下拉框只在“**双卡扩显存｜高清模式**”下显示并生效。
-
-- `SAFE｜保守·最稳`
-- `RESIDENT4｜驻留+·多用显存`
-- `RESIDENT8｜高驻留·减少搬运`
-- `MLP36｜副卡36%·轻度加活`
-- `MLP40｜副卡40%·高负载`
-- `HEAD20｜注意力+·副卡多分担`
-- `BALANCE｜均衡·推荐实验`
-- `MAX_TEST｜极限·可能爆显存`
-
-下拉框只保留人话说明。实际 MLP 比例、Attention heads、trim interval、VRAM reserve 与 hot cache 会输出到控制台日志，方便提交测试结果。
-
-## 普通 Style / 角色 LoRA
-
-使用公开节点 `H3VM Style LoRA Stack｜普通LoRA叠加`。它与 Turbo 加速 LoRA 分离：普通 LoRA 使用 ComfyUI `LoraLoaderModelOnly` 同类的标准 ModelPatcher weight-patch 语义，并在 H3VM 建立双卡执行树时同步到实际拥有对应权重的 root / island / helper patcher。
-
-- SINGLE_GPU：支持
-- DUAL_QUIET：支持
-- DUAL_CAPACITY：支持
-- DUAL_SYNC_ACCEL / Stock FullThrottle：支持普通 Style LoRA，但继续禁用 Turbo 加速 LoRA
-- 每个 Stack 节点提供 4 个槽位，可通过 `previous_stack` 继续串接，因此不是最多 4 个 LoRA
-
-已知 Larry / LightX H3 Turbo 权重必须放在 Master Loader 的 Turbo 槽，不允许伪装成普通 Style LoRA。
-
-## Turbo LoRA
-
-当前 Master Loader 已适配两类常见 H3 Turbo LoRA：
-
-- Larry `minimax_h3_turbo_v4_step600_ema.safetensors`
-- ModelTC / LightX2V `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors`
-
-加载器会根据 LoRA 家族选择对应 sampler 语义，并统一处理 12 / 3 video-audio sigma shift。步数统一提供 4 / 6 / 8 三档；若权重有更严格的步数契约，会在运行时提示或锁定。
-
-## 安装
-
-1. 将 `ComfyUI-H3-MultiGPU` 文件夹放入 `ComfyUI/custom_nodes/`。
-2. 安装 `requirements.txt` 中依赖（如环境尚未具备）。
-3. 重启 ComfyUI。
-4. 在节点搜索中找到 `H3VM Multi-GPU Loader｜H3多卡加载器`。
-
-覆盖升级时建议先删除旧版 `ComfyUI-H3-MultiGPU` 文件夹，再解压新版，避免旧实验文件残留。
-
-默认节点菜单只显示公开使用节点，避免历史实验节点刷屏。开发者如需重新显示全部 Lab 节点，可在启动 ComfyUI 前设置环境变量 `H3VM_SHOW_LAB_NODES=1`。
-
-## 双卡识别与同型号显卡
-
-H3VM **不要求两张显卡型号不同**。两张 RTX 3080、两张 RTX 5060 Ti 等同型号组合都可以使用；判断依据是当前 ComfyUI/Python 进程是否能看到两个不同的 CUDA 逻辑设备，而不是显卡名称是否不同。
-
-双卡模式默认选择 `gpu:0` + `gpu:1`。这里的编号是 PyTorch 当前进程看到的**逻辑编号**。如果启动脚本设置了 `CUDA_VISIBLE_DEVICES`，物理卡会被过滤并重新编号。例如只设置 `CUDA_VISIBLE_DEVICES=0` 时，即使机器实际安装了两张卡，当前 ComfyUI 进程也只会看到一个 `cuda:0`，双卡模式无法工作；设置为 `CUDA_VISIBLE_DEVICES=0,1` 后再重启 ComfyUI，进程才会看到两个逻辑 CUDA 设备。
-
-近期 Windows ComfyUI 版本可能为了规避 NVIDIA/CUDA 多 GPU 问题，默认只向当前进程暴露 GPU0。此时可使用 `--cuda-device all` 启动 ComfyUI，并确认启动日志同时列出 `cuda:0` 和 `cuda:1`。
-
-新版 preflight 在失败时会直接打印：
-
-- `PyTorch-visible CUDA devices`
-- `CUDA_VISIBLE_DEVICES` / `NVIDIA_VISIBLE_DEVICES`
-- 当前可见 GPU 名称与显存
-- 失败时 best-effort 的 `nvidia-smi` 物理 GPU 列表
-
-成功时控制台会出现 `[H3VM GPU PREFLIGHT]`，并列出实际解析出的 primary / secondary。这样可以区分“机器有两张卡”和“当前 ComfyUI 只看见一张卡”。
-
-### rc6 Windows comfy-kitchen DLPack Guard
-
-Windows 多卡环境中，量化权重可能已经位于 `cuda:1`，但当前 Python 线程的 CUDA current device 仍停在 `cuda:0`。comfy-kitchen CUDA backend 通过 DLPack 导出这类张量时，PyTorch 会拒绝 device index 不一致的导出。
-
-rc6 会在 Windows + 至少两张可见 CUDA GPU + comfy-kitchen CUDA backend 条件下安装窄范围兼容 Guard，在 DLPack 导出前切换到 tensor 所属 CUDA device。该 Guard 只补丁 comfy-kitchen 的 DLPack helper，不改 Quiet / Capacity / Mode4 调度算法；如需排障可设置 `H3VM_DISABLE_CK_MULTIGPU_GUARD=1` 关闭。
-
-典型已修复报错：
-
-```text
-BufferError: Can't export tensors on a different CUDA device index.
-Expected: 1. Current device: 0.
-```
-
-完整说明见 `RC6_WINDOWS_MULTIGPU_COMPAT.md`。此 Guard 不代表 H3VM 已解决所有 Windows/NVIDIA 的 host-memory、DynamicVRAM 或驱动级多卡问题。
-
-## 推荐测试顺序
-
-第一次测试建议保持相同 Prompt / Seed / LoRA，只切模式：
-
-1. `单卡｜标准模式`
-2. `双卡协同｜日常推荐`
-3. 单卡高分辨率 OOM 后，再切 `双卡扩显存｜高清模式`
-
-Capacity 档位测试建议先跑：
-
-`SAFE → RESIDENT8 → MLP40 → BALANCE`
-
-`MAX_TEST` 用于摸显存墙，OOM 属于预期实验结果之一。
-
-## 当前验证环境
-
-主要开发与验证环境：
-
-- Windows 11
-- RTX 5060 Ti 16GB + RTX 5060 8GB
-- PCIe 5.0 x8 + x8
-- 无 CUDA P2P，跨卡通过 host/RAM relay
-- ComfyUI 0.33.0
-- PyTorch 2.13.0 + CUDA 13.0
-- DynamicVRAM / comfy-aimdo
-- SageAttention
-
-其他显卡组合欢迎提交日志。异构双卡是本项目重点场景之一。
-
-## 项目状态
-
-- `DUAL_QUIET`：当前日常推荐
-- `DUAL_CAPACITY`：可用但仍属于实验性容量模式，尤其欢迎不同显存组合与高分辨率测试
-- `DUAL_SYNC_ACCEL`：内置 Stock H3 20-step FullThrottle（Dev9.4 Snapshot Islands，实验性近似执行）
-
-项目不会把“GPU1 更忙”当作加速成功。性能模式以 wall time / 主卡关键路径为准；Capacity 模式则以“单卡 OOM、双卡能完成”为主要成功标准。
-
-## 帮忙测试
-
-如果你愿意贡献不同 GPU 组合的数据，直接按 `TEST_REPORT_TEMPLATE.md` 回报即可。最有价值的是：双卡型号/显存、模式、分辨率、步数、是否完成、总耗时、两张卡专用显存峰值和音质情况。
 
 ## License
 
