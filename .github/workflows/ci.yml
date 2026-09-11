@@ -40,3 +40,49 @@ jobs:
           python tests/test_brand_contract.py
           python tests/test_fusion_docs_contract.py
           python tests/test_product_name_contract.py
+      - name: Build install package
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          mkdir -p dist/ComfyUI-H3-VRAM-Master
+          cp __init__.py base_runtime.py requirements.txt LICENSE THIRD_PARTY_NOTICES.md VERSION dist/ComfyUI-H3-VRAM-Master/
+          cp README.md README_EN.md BRAND_H3_VRAM_MASTER.md H3VM_PRODUCT_NAME H3VM_FUSION_ROADMAP.md dist/ComfyUI-H3-VRAM-Master/
+          cp -r h3vm web third_party scripts dist/ComfyUI-H3-VRAM-Master/
+          find dist/ComfyUI-H3-VRAM-Master -type d -name '__pycache__' -prune -exec rm -rf {} + || true
+          find dist/ComfyUI-H3-VRAM-Master -type f -name '*.pyc' -delete || true
+
+          cp example_workflows/H3VM_Dual_Quiet_Example.json 'dist/工作流_01_全功能_H3_VRAM_Master.json'
+          cp example_workflows/video_minimax_h3_t2v_H3VM_Core_DualQuiet.json 'dist/工作流_02_快速替换原Loader_H3VM_Core.json'
+
+          cat > 'dist/安装与工作流说明.txt' <<'EOF'
+          ComfyUI-H3-VRAM-Master
+          ======================
+
+          安装：
+          1. 关闭 ComfyUI。
+          2. 将 ComfyUI-H3-VRAM-Master 文件夹复制到 ComfyUI/custom_nodes/。
+          3. 不要同时保留旧的 ComfyUI-H3-MultiGPU 插件目录，避免重复节点/运行时桥冲突。
+          4. 启动 ComfyUI。
+
+          标准工作流：
+          1. 工作流_01_全功能_H3_VRAM_Master.json
+             使用 H3VM Master Loader，一套节点统一控制模型、模式、步数、尺寸、Seed、Sampler 与 H3VM Video VAE。
+             适合直接使用 H3 VRAM Master 全功能。
+
+          2. 工作流_02_快速替换原Loader_H3VM_Core.json
+             保留公版 MiniMax H3 工作流主体，只在 MODEL 路径插入 H3VM Core（MODEL -> H3VM -> MODEL）。
+             适合已有工作流快速接入，不改 Prompt、Seed、分辨率、Sampler、Sigmas 和实际 Steps。
+
+          当前融合分支：lab/h3-vram-master-fusion-v1
+          H3VM = H3 VRAM Master
+          EOF
+      - name: Upload install package
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ComfyUI-H3-VRAM-Master-PACK
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
