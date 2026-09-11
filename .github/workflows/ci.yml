@@ -57,6 +57,8 @@ jobs:
 
           cp example_workflows/H3VM_Dual_Quiet_Example.json 'dist/工作流_01_全功能_H3_VRAM_Master.json'
           cp example_workflows/video_minimax_h3_t2v_H3VM_Core_DualQuiet.json 'dist/工作流_02_快速替换原Loader_H3VM_Core.json'
+          sed -i 's/H3VM Multi-GPU Loader｜H3多卡加载器/H3VM VRAM Master Loader｜H3显存总控/g' 'dist/工作流_01_全功能_H3_VRAM_Master.json' 'dist/工作流_02_快速替换原Loader_H3VM_Core.json'
+          sed -i 's/H3VM Core｜多卡执行引擎/H3VM VRAM Master Core｜显存计算引擎/g' 'dist/工作流_01_全功能_H3_VRAM_Master.json' 'dist/工作流_02_快速替换原Loader_H3VM_Core.json'
 
           cat > 'dist/安装与工作流说明.txt' <<'EOF'
           ComfyUI-H3-VRAM-Master
@@ -70,11 +72,11 @@ jobs:
 
           标准工作流：
           1. 工作流_01_全功能_H3_VRAM_Master.json
-             使用 H3VM Master Loader，一套节点统一控制模型、模式、步数、尺寸、Seed、Sampler 与 H3VM Video VAE。
+             使用 H3VM VRAM Master Loader，一套节点统一控制模型、模式、步数、尺寸、Seed、Sampler 与 H3VM Video VAE。
              适合直接使用 H3 VRAM Master 全功能。
 
           2. 工作流_02_快速替换原Loader_H3VM_Core.json
-             保留公版 MiniMax H3 工作流主体，只在 MODEL 路径插入 H3VM Core（MODEL -> H3VM -> MODEL）。
+             保留公版 MiniMax H3 工作流主体，只在 MODEL 路径插入 H3VM VRAM Master Core（MODEL -> H3VM -> MODEL）。
              适合已有工作流快速接入，不改 Prompt、Seed、分辨率、Sampler、Sigmas 和实际 Steps。
 
           当前融合分支：lab/h3-vram-master-fusion-v1
@@ -86,6 +88,11 @@ jobs:
           - Host Attention 六路传输合并为单 packet relay
           - bounded pinned 双缓冲 segmented relay（失败自动退回旧路径）
           - Exact-SP sequence/head exchange fabric 与真机 parity probe
+
+          双16G开发机建议测试：
+          scripts\vram_master_phase1.ps1 负责真实 H3 Quantized-QKV parity。
+          scripts\vram_master_phase2.ps1 负责 packet relay benchmark + Exact-SP exchange parity。
+          Phase2 默认只测 Windows-safe pageable；要额外试 bounded pinned 可加 -TestPinned。
           EOF
       - name: Upload install package
         if: github.event_name != 'pull_request'
