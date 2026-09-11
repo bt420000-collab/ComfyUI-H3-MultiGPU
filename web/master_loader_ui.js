@@ -1,13 +1,13 @@
 import { app } from "../../scripts/app.js";
 
-// H3VM Multi-GPU Loader UI polish.
+// H3 VRAM Master Loader UI polish.
 // Keep the public node compact and self-explanatory:
 // - Capacity profile is visible only in DUAL_CAPACITY.
 // - Custom width/height are visible only for CUSTOM resolution.
 // - Prompt stays last, advanced/folded by default, with a large editor when open.
 // - No extra help panel or colored/blue explanatory text is injected.
 app.registerExtension({
-    name: "H3VM.MultiGPULoaderUI",
+    name: "H3VM.VRAMMasterLoaderUI",
     beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData?.name !== "H3VMMasterLoader") return;
 
@@ -26,14 +26,12 @@ app.registerExtension({
             const refreshLayout = () => {
                 this.setDirtyCanvas?.(true, true);
                 requestAnimationFrame(() => {
-                    // Preserve user-selected width. Only allow the node to shrink/grow vertically.
                     try {
                         const natural = this.computeSize?.();
                         if (natural && this.size) {
                             this.setSize?.([Math.max(this.size[0], natural[0]), natural[1]]);
                         }
                     } catch (_) {
-                        // Frontend versions differ; hidden widgets still work without forced resize.
                     }
                     this.setDirtyCanvas?.(true, true);
                 });
