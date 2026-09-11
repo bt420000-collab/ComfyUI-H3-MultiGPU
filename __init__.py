@@ -1,9 +1,7 @@
-"""H3VM v0.20.0-rc6 public product wrapper.
+"""ComfyUI-H3-VRAM-Master public product wrapper.
 
-The frozen rc1 runtime lives in base_runtime.py. rc5 added the public MODEL->MODEL
-Core engine, mode-independent ordinary LoRA stack, and built-in Stock-H3 Mode4.
-rc6 adds Windows multi-GPU compatibility guards without rewriting the proven
-Quiet/Capacity/Mode4 execution algorithms.
+H3VM now means H3 VRAM Master. The proven rc6 public runtime remains the base,
+with hardware-aware planning and fusion overlays layered above it.
 """
 from .base_runtime import *  # noqa: F401,F403
 from . import base_runtime as _base
@@ -69,7 +67,7 @@ class H3VMCoreEngine:
     RETURN_NAMES = ("model", "mode")
     FUNCTION = "adapt"
     CATEGORY = "MiniMaxH3/H3VM"
-    DESCRIPTION = "纯执行引擎：MODEL -> H3VM -> MODEL。不修改 Prompt/Seed/分辨率/Sampler/Sigmas/实际 Steps。"
+    DESCRIPTION = "H3 VRAM Master 纯执行引擎：MODEL -> H3VM -> MODEL。不修改 Prompt/Seed/分辨率/Sampler/Sigmas/实际 Steps。"
 
     def adapt(self, model, gpu_mode="DUAL_QUIET｜双卡协同·执行引擎",
               capacity_vram_profile="SAFE｜保守·最稳", expected_steps_hint=4, telemetry=True):
@@ -85,7 +83,7 @@ class H3VMCoreEngine:
 
 
 class H3VMMasterLoader(_base.H3VMMasterLoader):
-    """Standalone cockpit stays integrated; external workflows should use H3VMCoreEngine."""
+    """Standalone H3 VRAM Master cockpit; external workflows can use H3VMCoreEngine."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -165,8 +163,8 @@ PUBLIC_NODE_CLASS_MAPPINGS.update({
 })
 PUBLIC_NODE_DISPLAY_NAME_MAPPINGS = dict(_base.PUBLIC_NODE_DISPLAY_NAME_MAPPINGS)
 PUBLIC_NODE_DISPLAY_NAME_MAPPINGS.update({
-    "H3VMMasterLoader": "H3VM Multi-GPU Loader｜H3多卡加载器",
-    "H3VMCoreEngine": "H3VM Core｜多卡执行引擎",
+    "H3VMMasterLoader": "H3VM VRAM Master Loader｜H3显存总控",
+    "H3VMCoreEngine": "H3VM VRAM Master Core｜显存计算引擎",
     "H3VMStyleLoRAStack": "H3VM Style LoRA Stack｜普通LoRA叠加",
 })
 LAB_NODE_CLASS_MAPPINGS = _base.LAB_NODE_CLASS_MAPPINGS
@@ -177,4 +175,4 @@ if H3VM_SHOW_LAB_NODES:
     NODE_CLASS_MAPPINGS.update(LAB_NODE_CLASS_MAPPINGS)
     NODE_DISPLAY_NAME_MAPPINGS.update(LAB_NODE_DISPLAY_NAME_MAPPINGS)
 
-print("[H3VM v0.20.0-rc6] Master Loader + public MODEL->MODEL Core + Windows multi-GPU compatibility guard ready", flush=True)
+print("[ComfyUI-H3-VRAM-Master] H3VM runtime ready | Master Loader + MODEL->MODEL Core + fusion overlays", flush=True)
