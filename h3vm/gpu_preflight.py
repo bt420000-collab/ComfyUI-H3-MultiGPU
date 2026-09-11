@@ -1,17 +1,19 @@
 """H3VM dual-GPU visibility and logical-device preflight.
 
 This module intentionally patches the small device-selection boundary instead of
-editing the frozen heavy runtime in ``loader_base.py``.  H3VM device options are
-logical CUDA indices as seen by the current ComfyUI/Python process.  Therefore a
-``CUDA_VISIBLE_DEVICES`` mask may renumber physical GPUs, and identical GPU model
-names are perfectly valid as long as two different logical devices are visible.
+editing the frozen heavy runtime in ``loader_base.py``. H3VM device options are
+logical CUDA indices as seen by the current ComfyUI/Python process. Therefore a
+``CUDA_VISIBLE_DEVICES`` mask may renumber or hide physical GPUs. GPU model names
+and VRAM sizes do not need to match; what matters is that two distinct logical
+CUDA devices are visible to the running process.
 """
 from __future__ import annotations
 
 import os
 import subprocess
+import sys
 
-_PATCH_FLAG = "_h3vm_gpu_preflight_v2_installed"
+_PATCH_FLAG = "_h3vm_gpu_preflight_v3_installed"
 _LOGGED_PAIRS: set[tuple[int, int]] = set()
 
 
@@ -29,12 +31,24 @@ def _explicit_cuda_index(option):
     return None
 
 
+def _startup_cuda_device_arg(argv=None):
+    """Return ComfyUI's --cuda-device value when the process was pinned at launch."""
+    items = list(sys.argv if argv is None else argv)
+    for index, item in enumerate(items):
+        text = str(item).strip()
+        if text == "--cuda-device" and index + 1 < len(items):
+            return str(items[index + 1]).strip()
+        if text.startswith("--cuda-device="):
+            return text.split("=", 1)[1].strip()
+    return None
+
+
 def _resolve_device(option):
     """Resolve H3VM's explicit GPU choices as PyTorch-logical CUDA devices.
 
-    Explicit ``gpu:N`` / ``cuda:N`` values bypass ComfyUI's resolver so two
-    same-model cards cannot collapse onto a preferred/default device.  Other
-    option forms still delegate to ComfyUI for compatibility.
+    Explicit ``gpu:N`` / ``cuda:N`` values bypass ComfyUI's resolver so device
+    selections remain stable even for identical cards. Other option forms still
+    delegate to ComfyUI for compatibility.
     """
     import torch
 
@@ -111,6 +125,46 @@ def _nvidia_smi_inventory():
     return tuple(line.strip() for line in proc.stdout.splitlines() if line.strip())
 
 
+def _visibility_remediation(cuda_visible, physical):
+    """Build actionable startup guidance without pretending a live process can unmask CUDA."""
+    lines = []
+    launch_cuda_device = _startup_cuda_device_arg()
+
+    if len(physical) >= 2:
+        lines.extend(
+            [
+                f"nvidia-smi reports {len(physical)} physical NVIDIA GPUs, but PyTorch sees fewer than two.",
+                "This is a startup visibility/masking problem, not a GPU-model compatibility failure.",
+                "H3VM supports both identical and heterogeneous GPU pairs; model names and VRAM sizes may differ.",
+            ]
+        )
+    else:
+        lines.append(
+            "H3VM supports both identical and heterogeneous GPU pairs, but two CUDA logical devices must be visible."
+        )
+
+    if launch_cuda_device not in (None, "", "all"):
+        lines.append(
+            f"ComfyUI startup pin detected: --cuda-device {launch_cuda_device}. "
+            "Remove the single-GPU pin or start ComfyUI with --cuda-device all, then restart."
+        )
+
+    if cuda_visible not in (None, "", "-1"):
+        lines.append(
+            "CUDA_VISIBLE_DEVICES is set. H3VM cannot unmask a GPU after PyTorch has started. "
+            "Expose both target physical GPUs before launch (for example CUDA_VISIBLE_DEVICES=0,1), then restart ComfyUI."
+        )
+    elif launch_cuda_device in (None, "", "all"):
+        lines.append(
+            "Verify the NVIDIA driver/startup environment, restart ComfyUI, and confirm torch.cuda.device_count() >= 2."
+        )
+
+    lines.append(
+        "Do not select gpu:1 until the startup/preflight log shows at least two PyTorch-visible CUDA devices."
+    )
+    return lines
+
+
 def _common_preflight(primary_device, secondary_device):
     import torch
 
@@ -134,22 +188,7 @@ def _common_preflight(primary_device, secondary_device):
         if physical:
             message.append("System GPUs reported by nvidia-smi:")
             message.extend(f"  {row}" for row in physical)
-        message.extend(
-            [
-                "H3VM supports identical GPU model names (for example two RTX 3080s).",
-                "The two selected GPUs must both be visible to this ComfyUI/Python process.",
-            ]
-        )
-        if cuda_visible not in (None, "", "-1"):
-            message.append(
-                "CUDA_VISIBLE_DEVICES is set. Restart ComfyUI with both target GPUs exposed "
-                "(for example CUDA_VISIBLE_DEVICES=0,1), then select gpu:0 + gpu:1 inside H3VM."
-            )
-        else:
-            message.append(
-                "Verify the NVIDIA driver/startup environment, restart ComfyUI, and confirm "
-                "torch.cuda.device_count() is at least 2 before using a dual-GPU mode."
-            )
+        message.extend(_visibility_remediation(cuda_visible, physical))
         raise RuntimeError("\n".join(message))
 
     primary = _resolve_device(primary_device)
@@ -167,19 +206,18 @@ def _common_preflight(primary_device, secondary_device):
     if primary == secondary:
         raise RuntimeError(
             f"H3VM needs two different logical CUDA devices, got {primary} and {secondary}. "
-            "Identical GPU model names are supported; choose two different indices such as gpu:0 and gpu:1."
+            "GPU model names may be identical or different; choose two distinct indices such as gpu:0 and gpu:1."
         )
 
     pair = (int(primary.index), int(secondary.index))
     if pair not in _LOGGED_PAIRS:
         primary_name = str(torch.cuda.get_device_name(primary))
         secondary_name = str(torch.cuda.get_device_name(secondary))
-        same_model = primary_name == secondary_name
+        pair_kind = "identical-model" if primary_name == secondary_name else "heterogeneous"
         print(
             f"[H3VM GPU PREFLIGHT] visible={visible_count} | "
             f"primary={primary} ({primary_name}) | secondary={secondary} ({secondary_name}) | "
-            f"identical_models={'yes' if same_model else 'no'} | "
-            f"CUDA_VISIBLE_DEVICES={cuda_visible!r}",
+            f"pair={pair_kind} | CUDA_VISIBLE_DEVICES={cuda_visible!r}",
             flush=True,
         )
         _LOGGED_PAIRS.add(pair)
