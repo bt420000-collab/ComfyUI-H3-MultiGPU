@@ -16,6 +16,21 @@ from .comfy_kitchen_multigpu import (
 _install_ck_multigpu_guard()
 del _install_ck_multigpu_guard
 
+# Upgrade explicit neutral_pinned TransportEngine moves to a bounded two-slot
+# segmented pipeline. It reuses the existing ring allocation and falls back to
+# the legacy blocking bounce if the platform rejects the pipelined path.
+from .segmented_relay import install_segmented_relay_patch as _install_segmented_relay_patch
+_install_segmented_relay_patch()
+del _install_segmented_relay_patch
+
+# Host attention used to perform six independent RAM crossings for q/k/v and
+# their scales. Packetize the helper shard into one aligned transient transfer.
+from .attention_relay_packet import (
+    install_attention_relay_packet_patch as _install_attention_relay_packet_patch,
+)
+_install_attention_relay_packet_patch()
+del _install_attention_relay_packet_patch
+
 from .core_adapter import install_runtime_bridge as _install_runtime_bridge
 _install_runtime_bridge()
 del _install_runtime_bridge
