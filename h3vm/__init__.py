@@ -1,21 +1,40 @@
-"""H3VM rc6 runtime package. Heavy CUDA/Comfy imports remain lazy where possible."""
+"""H3 VRAM Master runtime package.
 
-# Install the logical-device resolver before Core/loader compatibility wrappers
-# import and bind loader_base private helpers.
-from .gpu_preflight import install_gpu_preflight_patch as _install_gpu_preflight_patch
-_install_gpu_preflight_patch()
-del _install_gpu_preflight_patch
+Importing this package is side-effect free. Runtime compatibility hooks are
+installed only when an H3VM execution path is actually used.
+"""
+from __future__ import annotations
 
-# Windows + multi-GPU + comfy-kitchen CUDA can enter a state where a tensor is
-# physically on cuda:1 while the thread current device remains cuda:0. PyTorch
-# then rejects comfy-kitchen's DLPack export. Install the narrow, idempotent
-# compatibility guard before H3VM starts constructing/loading GPU islands.
-from .comfy_kitchen_multigpu import (
-    install_comfy_kitchen_multigpu_dlpack_guard as _install_ck_multigpu_guard,
-)
-_install_ck_multigpu_guard()
-del _install_ck_multigpu_guard
+from threading import RLock
 
-from .core_adapter import install_runtime_bridge as _install_runtime_bridge
-_install_runtime_bridge()
-del _install_runtime_bridge
+_RUNTIME_LOCK = RLock()
+_RUNTIME_ACTIVE = False
+_RUNTIME_ACTIVATING = False
+
+
+def runtime_active() -> bool:
+    return bool(_RUNTIME_ACTIVE)
+
+
+def activate_runtime() -> bool:
+    global _RUNTIME_ACTIVE, _RUNTIME_ACTIVATING
+    if _RUNTIME_ACTIVE:
+        return True
+    with _RUNTIME_LOCK:
+        if _RUNTIME_ACTIVE:
+            return True
+        if _RUNTIME_ACTIVATING:
+            return False
+        _RUNTIME_ACTIVATING = True
+        try:
+            from .gpu_preflight import install_gpu_preflight_patch
+            install_gpu_preflight_patch()
+            from .comfy_kitchen_multigpu import install_comfy_kitchen_multigpu_dlpack_guard
+            install_comfy_kitchen_multigpu_dlpack_guard()
+            from .v0211_mode4 import install_snapshot_runtime_patch
+            install_snapshot_runtime_patch()
+            _RUNTIME_ACTIVE = True
+            print("[H3VM] v0.21.1 runtime activated lazily | standard workflows untouched", flush=True)
+            return True
+        finally:
+            _RUNTIME_ACTIVATING = False

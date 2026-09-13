@@ -1,202 +1,94 @@
-# H3 VRAM Master for ComfyUI
+# H3 VRAM Master v0.21.1 for ComfyUI
 
-**H3VM = H3 VRAM Master**
+**H3VM = H3 VRAM Master**  
+[中文](README.md) | **English**
 
-[中文说明](README.md) | **English**
+H3VM is a VRAM and multi-GPU execution engine for local **MiniMax H3** generation.
 
-H3 VRAM Master is a **VRAM and multi-GPU execution manager for local MiniMax H3 generation**.
+> **You keep your workflow. H3VM schedules the GPUs.**
 
-It is not just a dual-GPU loader, and its goal is not to make a second GPU look busy.
+v0.21.1 focuses on a smaller public surface, stronger isolation, newer ComfyUI compatibility, and more practical controls for heterogeneous GPU pairs.
 
-Its purpose is to organize the GPU compute, VRAM, and host memory already available in a normal workstation, then choose the most useful execution strategy for the current H3 workload.
+## v0.21.1 highlights
 
-> **You choose the shot. H3VM decides how the machine runs it.**
+### Newer ComfyUI multi-GPU compatibility
 
-Current stable release: **v0.20.0-rc6**
+For dual-GPU use, start ComfyUI with both GPUs visible:
 
----
-
-## Why H3VM exists
-
-Local H3 systems often have unused hardware rather than no hardware:
-
-- one GPU is saturated while another is nearly idle;
-- two cards have enough combined VRAM, but the model still has to fit on one card;
-- cross-GPU traffic can cost more than the compute it was meant to save;
-- many Windows consumer systems have no NVLink or CUDA P2P;
-- a fixed split makes little sense for asymmetric GPU pairs.
-
-H3VM is built around one practical question:
-
-> **What is the best way to run this workload on this machine?**
-
----
-
-## Current stable execution modes
-
-### Single GPU
-
-Compatibility and baseline mode.
-
-Internal name: `SINGLE_GPU`
-
-### Dual-GPU Cooperative
-
-The daily-use path. Two GPUs share useful work while H3VM balances wall time, VRAM pressure, and stability.
-
-Internal name: `DUAL_QUIET`
-
-### Dual-GPU Capacity
-
-Capacity-first mode for workloads that do not fit comfortably on one GPU.
-
-Internal name: `DUAL_CAPACITY`
-
-The first success criterion is simple:
-
-> **single GPU does not fit, multi-GPU H3VM completes.**
-
-### Dual-GPU Fast
-
-The speed-first Mode4 / FullThrottle path. It may use snapshot and prediction-based execution so the two GPUs can advance useful work out of phase.
-
-Internal name: `DUAL_SYNC_ACCEL`
-
-> The development line also contains a **Dual-GPU Native / Exact-SP** direction. It remains a promotion candidate until it passes real-H3 parity, wall-time, VRAM, and transport gates.
-
----
-
-## No NVLink required
-
-Windows consumer GPUs without CUDA P2P are a first-class target.
-
-When direct GPU communication is available, H3VM can use it. When it is not, H3VM can relay data through host memory.
-
-The goal is not to turn every user into a PCIe topology expert.
-
-> **Use the direct road when it exists. Use the host-memory road when it does not. Avoid traffic jams either way.**
-
----
-
-## H3VM manages memory, not only GPU count
-
-The runtime is intended to coordinate:
-
-- model residency;
-- dynamic VRAM loading and eviction;
-- RAM backing;
-- partial / quantized computation;
-- cross-GPU transport;
-- per-device reserve and cache policy;
-- dual-GPU Video VAE work;
-- safe fallback paths.
-
-The real question is not merely “How do I use two GPUs?”
-
-It is:
-
-> **How should the whole machine serve H3?**
-
----
-
-## Two ways to use H3VM
-
-### H3VM Master Loader
-
-An integrated controller for direct generation and quick A/B testing.
-
-### H3VM Core
-
-A narrow execution boundary for existing workflows:
-
-```text
-MODEL
-  |
-  v
-H3VM Core
-  |
-  v
-MODEL
+```bash
+--cuda-device all
 ```
 
-The surrounding workflow keeps ownership of prompt, seed, resolution, sampler, sigmas, and actual sampling steps.
+H3VM does not require a separate set of plugin-specific startup flags beyond making both target CUDA devices visible. Existing ComfyUI flags can generally remain as-is.
 
-The goal is simple:
+Identical and heterogeneous GPU pairs are supported; model names and VRAM sizes do not need to match.
 
-> **You should not have to rebuild your workflow just to use multiple GPUs.**
+### Isolated lazy runtime
 
----
+H3VM runtime activates only when an H3VM execution path is used. Standard Prompt, Seed, resolution, duration, Sampler, Sigmas, actual Steps, CLIP/text encoder and normal ComfyUI workflow ownership remain unchanged.
 
-## Development philosophy
+### Three practical dual-GPU modes
 
-H3VM is not a collection of multi-GPU buzzwords.
+- **Multi-GPU Fast**: speed-first execution.
+- **Multi-GPU Capacity**: VRAM-first execution for workloads that may OOM on one card.
+- **Multi-GPU Background**: leaves more GPU headroom for desktop, browser, editing and other foreground work.
 
-A new technique belongs in the mainline only when it provides at least one measurable benefit:
+Disable multi-GPU support to use the normal single-GPU path.
 
-1. **Speed** — lower real wall time.
-2. **Capacity** — complete workloads that do not fit on one GPU.
-3. **Quality / exactness** — more reliable computation at comparable cost.
-4. **Compatibility** — make ordinary hardware configurations usable.
-5. **Usability** — less workflow surgery, less manual tuning, clearer behavior.
+### Multiple predictors for Fast mode
 
-**A busier GPU1 is not proof of an optimization.**
+- **SPECTRAL**: new default fast predictor with a higher performance ceiling.
+- **LINEAR**: retained as a compatibility / A-B comparison route.
 
-The long-term product and engineering charter is here:
+Different motion and scene content can use different prediction behavior instead of forcing one predictor onto every video.
 
-> [H3VM_PRODUCT_CHARTER.md](H3VM_PRODUCT_CHARTER.md)
+### Adjustable secondary-GPU participation
 
-Implementation details may change quickly. The product direction should not drift with them.
+Presets: `100% / 75% / 50% / 25% / custom 1–100%`.
 
----
+This lets H3VM adapt to equal cards, asymmetric cards, 16 GB + 8 GB, 16 GB + 16 GB and other real-world combinations.
 
-## Long-term direction: a hardware-aware Planner
+### Focused Loader-replacement engine
 
-H3VM should progressively replace fixed tuning tables with a Planner that understands the machine.
+The compatibility-heavy all-in-one Master Loader is removed from the public surface. v0.21.1 exposes only:
 
-It can consider:
+- **H3VM Core** for MODEL execution / VRAM / multi-GPU scheduling.
+- **H3VM Video VAE** for optional dual-GPU MiniMax H3 Video VAE decoding.
 
-- VRAM capacity;
-- GPU compute scale;
-- symmetry between devices;
-- CUDA P2P availability;
-- measured host-relay bandwidth;
-- model / quantization format;
-- resolution, duration, and step count;
-- the current goal: speed, capacity, or exactness.
+Connect H3VM Core after your existing Model Loader:
 
-> **The goal is not to teach users multi-GPU tuning. The goal is for H3VM to learn the user's machine.**
+```text
+Model Loader -> H3VM Core -> your existing sampler / workflow
+```
 
----
+Your original workflow keeps ownership of Prompt, Seed, resolution, Sampler and Steps.
 
-## Installation
+## Quick start
 
-Place the plugin directory under `ComfyUI/custom_nodes/`, install missing dependencies from `requirements.txt`, make sure the target CUDA devices are visible to the current ComfyUI/Python process, and restart ComfyUI.
+1. Put this repository under `ComfyUI/custom_nodes/`.
+2. For dual-GPU use, start ComfyUI with `--cuda-device all`.
+3. Insert `H3VM Core` after your existing Model Loader.
+4. Start with **Multi-GPU Fast + SPECTRAL + 100% secondary participation**.
+5. Standard MiniMax H3: **20 Steps / H3VM Hint 20**.
+6. Use Capacity when VRAM is the bottleneck; use Background when the same PC must stay responsive for other tasks.
 
-When upgrading, move aside older H3VM plugin folders so duplicate nodes and runtime bridges cannot load together.
+## Under-the-hood stability work
 
-Identical GPU models are supported; H3VM cares about distinct CUDA logical devices, not different marketing names.
+- Mode4 run boundaries now follow the ComfyUI `OUTER_SAMPLE` lifecycle; Steps Hint is scheduling guidance only.
+- Predictor startup no longer commits a temporary coordinate source before real timestep data is available.
+- Dual Video VAE adds best-effort same-weight identity validation.
+- The bundled reference workflow is aligned to **20 Steps / Hint 20**.
+- Newer ComfyUI visibility/preflight fixes for heterogeneous GPU pairs are retained.
 
----
+## Reference workflow
 
-## Recommended validation
+`example_workflows/01_H3VM_Core_Reference_Workflow.json`
 
-Keep prompt, seed, model, LoRA, resolution, and other generation conditions fixed while comparing modes.
+## Compatibility baseline
 
-For performance modes, measure **wall time and the primary critical path**.
+v0.21.1 was release-checked against the current **ComfyUI v0.35.0** API surface.
 
-For Capacity mode, the first success criterion is:
-
-> **single GPU fails to fit, multi-GPU H3VM completes.**
-
----
-
-## Public runtime boundary
-
-Public H3VM focuses on the execution layer: VRAM management, multi-GPU compute, planning, host relay, Attention / QKV / MLP sharding, Capacity, Mode4, Exact-SP research, Dual Video VAE, and telemetry.
-
-Higher-level production orchestration such as job queues, worker leases, project lifecycle, P1/P2/P3 scheduling, and artifact routing belongs outside the public runtime.
-
----
+Windows consumer dual-GPU systems without NVLink / CUDA P2P remain a primary H3VM target.
 
 ## Author
 

@@ -1,180 +1,247 @@
-"""H3VM v0.20.0-rc6 public product wrapper.
+"""ComfyUI-H3-VRAM-Master v0.21.1 focused public release.
 
-The frozen rc1 runtime lives in base_runtime.py. rc5 added the public MODEL->MODEL
-Core engine, mode-independent ordinary LoRA stack, and built-in Stock-H3 Mode4.
-rc6 adds Windows multi-GPU compatibility guards without rewriting the proven
-Quiet/Capacity/Mode4 execution algorithms.
+Public surface:
+    MODEL -> H3VM Core -> MODEL + H3VM_MODE + H3VM_VAE_POLICY
+    LATENT + VAE + H3VM_MODE + H3VM_VAE_POLICY -> H3VM Video VAE Decode -> IMAGE
+
+Installing the plugin is side-effect free. Runtime patches are activated lazily only
+when an H3VM execution path actually runs. Standard ComfyUI CLIP/text encoder,
+VAE loader, sampler, prompt, seed, duration, and resolution controls are untouched.
 """
-from .base_runtime import *  # noqa: F401,F403
-from . import base_runtime as _base
+from __future__ import annotations
 
-WEB_DIRECTORY = _base.WEB_DIRECTORY
-H3VM_SHOW_LAB_NODES = _base.H3VM_SHOW_LAB_NODES
+from pathlib import Path
 
-MASTER_GPU_MODES_RC5 = (
-    "SINGLE_GPU｜单卡·标准模式",
-    "DUAL_QUIET｜双卡协同·日常推荐",
-    "DUAL_CAPACITY｜双卡扩显存·高清模式",
-    "DUAL_SYNC_ACCEL｜双卡满血·原版20步",
+try:
+    H3VM_VERSION = Path(__file__).resolve().with_name("VERSION").read_text(encoding="utf-8").strip()
+except Exception:
+    H3VM_VERSION = "unknown"
+__version__ = H3VM_VERSION
+
+from .h3vm.master_console import PRODUCT_MODES, PARTICIPATION_PRESETS
+
+MODE4_PREDICTORS = (
+    "SPECTRAL｜频谱极速",
+    "LINEAR｜标准极速",
 )
-CORE_GPU_MODES_RC5 = (
-    "SINGLE_GPU｜单卡·执行引擎",
-    "DUAL_QUIET｜双卡协同·执行引擎",
-    "DUAL_CAPACITY｜双卡扩显存·执行引擎",
-    "DUAL_SYNC_ACCEL｜双卡满血·Snapshot引擎",
-)
-
-
-class H3VMStyleLoRAStack:
-    @classmethod
-    def INPUT_TYPES(cls):
-        import folder_paths
-        from .h3vm.style_lora import NONE_LORA
-        choices = [NONE_LORA] + list(folder_paths.get_filename_list("loras"))
-        req = {}
-        for i in range(1, 5):
-            req[f"lora_{i}"] = (choices, {"default": NONE_LORA})
-            req[f"strength_{i}"] = ("FLOAT", {"default": 1.0, "min": -4.0, "max": 4.0, "step": 0.05})
-        return {"required": req, "optional": {"previous_stack": ("H3VM_LORA_STACK",)}}
-
-    RETURN_TYPES = ("H3VM_LORA_STACK", "STRING")
-    RETURN_NAMES = ("style_lora_stack", "summary")
-    FUNCTION = "build"
-    CATEGORY = "MiniMaxH3/H3VM"
-    DESCRIPTION = "普通风格/角色 LoRA 叠加。每节点 4 槽，可串接 previous_stack；与 Turbo 加速 LoRA 分离。"
-
-    def build(self, lora_1, strength_1, lora_2, strength_2, lora_3, strength_3,
-              lora_4, strength_4, previous_stack=None):
-        from .h3vm.style_lora import append_style_loras, stack_summary
-        stack = append_style_loras(previous_stack, [
-            (lora_1, strength_1), (lora_2, strength_2), (lora_3, strength_3), (lora_4, strength_4)
-        ])
-        return stack, stack_summary(stack)
+UI_LANGUAGES = ["中文", "English"]
+WEB_DIRECTORY = "./web"
 
 
 class H3VMCoreEngine:
+    """Pure MODEL -> MODEL H3 multi-GPU execution adapter."""
+
     @classmethod
     def INPUT_TYPES(cls):
-        from .h3vm.master_console import CAPACITY_VRAM_PROFILES
-        return {"required": {
-            "model": ("MODEL",),
-            "gpu_mode": (CORE_GPU_MODES_RC5, {"default": "DUAL_QUIET｜双卡协同·执行引擎"}),
-            "capacity_vram_profile": (CAPACITY_VRAM_PROFILES, {"default": "SAFE｜保守·最稳"}),
-            "expected_steps_hint": ("INT", {"default": 4, "min": 1, "max": 100, "step": 1,
-                "tooltip": "只给 H3VM 做预取/最后一步调度提示；不修改主工作流实际 Steps。"}),
-            "telemetry": ("BOOLEAN", {"default": True}),
-        }}
+        return {
+            "required": {
+                "ui_language": (UI_LANGUAGES, {"default": "中文"}),
+                "model": ("MODEL",),
+                "multi_gpu_enabled": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "label_on": "开启",
+                        "label_off": "关闭",
+                        "tooltip": "关闭后保持单卡执行；开启后使用所选 H3VM 双卡策略。",
+                    },
+                ),
+                "dual_vae_enabled": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "label_on": "开启",
+                        "label_off": "关闭",
+                        "tooltip": "统一控制 H3VM Video VAE 双卡解码。双卡性能差距很大时可关闭。",
+                    },
+                ),
+                "gpu_mode": (
+                    PRODUCT_MODES,
+                    {
+                        "default": "双卡极速",
+                        "tooltip": "双卡极速：速度优先；双卡扩容：显存优先；双卡后台：保守协同。",
+                    },
+                ),
+                "mode4_predictor": (
+                    MODE4_PREDICTORS,
+                    {
+                        "default": "SPECTRAL｜频谱极速",
+                        "tooltip": "仅双卡极速生效。频谱极速为默认；标准极速使用 LINEAR Predictor。",
+                    },
+                ),
+                "gpu_participation": (
+                    PARTICIPATION_PRESETS,
+                    {
+                        "default": "全｜100%",
+                        "tooltip": "副卡参与强度。不同模式会映射到各自已验证的安全参数。",
+                    },
+                ),
+                "custom_participation": (
+                    "INT",
+                    {
+                        "default": 100,
+                        "min": 1,
+                        "max": 100,
+                        "step": 1,
+                        "tooltip": "仅当副卡参与度选择“自定义”时生效。",
+                    },
+                ),
+                "expected_steps_hint": (
+                    "INT",
+                    {
+                        "default": 20,
+                        "min": 1,
+                        "max": 100,
+                        "step": 1,
+                        "tooltip": "只用于 H3VM 预取/末步质量调度提示；真实采样边界由 Sampler 自动识别。填错不会跨任务复用状态，也不会修改原工作流实际采样步数。",
+                    },
+                ),
+                "telemetry": ("BOOLEAN", {"default": True}),
+            }
+        }
 
-    RETURN_TYPES = ("MODEL", "H3VM_MODE")
-    RETURN_NAMES = ("model", "mode")
+    RETURN_TYPES = ("MODEL", "H3VM_MODE", "H3VM_VAE_POLICY")
+    RETURN_NAMES = ("model", "mode", "vae_policy")
     FUNCTION = "adapt"
     CATEGORY = "MiniMaxH3/H3VM"
-    DESCRIPTION = "纯执行引擎：MODEL -> H3VM -> MODEL。不修改 Prompt/Seed/分辨率/Sampler/Sigmas/实际 Steps。"
+    DESCRIPTION = (
+        "H3 VRAM Master Core：只接管 MODEL 执行与显存/双卡调度。"
+        "不修改 Prompt、Seed、分辨率、时长、Sampler、Sigmas、实际 Steps、CLIP 或 VAE Loader。"
+    )
 
-    def adapt(self, model, gpu_mode="DUAL_QUIET｜双卡协同·执行引擎",
-              capacity_vram_profile="SAFE｜保守·最稳", expected_steps_hint=4, telemetry=True):
-        from .h3vm.master_console import normalize_mode
+    def adapt(
+        self,
+        model,
+        ui_language="中文",
+        multi_gpu_enabled=True,
+        dual_vae_enabled=True,
+        gpu_mode="双卡极速",
+        mode4_predictor="SPECTRAL｜频谱极速",
+        gpu_participation="全｜100%",
+        custom_participation=100,
+        expected_steps_hint=20,
+        telemetry=True,
+    ):
+        del ui_language
+        from .h3vm import activate_runtime
+
+        activate_runtime()
+        from .h3vm.master_console import resolve_public_mode, resolve_participation_percent
         from .h3vm.core_adapter import H3VMCoreConfig, adapt_model
-        mode = normalize_mode(gpu_mode)
-        out = adapt_model(model, config=H3VMCoreConfig(
-            mode=mode, primary_device="gpu:0", secondary_device="gpu:1",
-            capacity_vram_profile=str(capacity_vram_profile), expected_steps=max(1, int(expected_steps_hint)),
-            telemetry=bool(telemetry),
-        ))
-        return out, mode
+
+        mode = resolve_public_mode(multi_gpu_enabled, gpu_mode)
+        participation = resolve_participation_percent(gpu_participation, custom_participation)
+        out = adapt_model(
+            model,
+            config=H3VMCoreConfig(
+                mode=mode,
+                primary_device="gpu:0",
+                secondary_device="gpu:1",
+                capacity_vram_profile="SAFE｜保守·最稳",
+                expected_steps=max(1, int(expected_steps_hint)),
+                telemetry=bool(telemetry),
+                mode4_predictor=str(mode4_predictor),
+                secondary_participation=float(participation),
+                public_controls=True,
+            ),
+        )
+        vae_policy = {
+            "dual_vae_enabled": bool(dual_vae_enabled) and mode != "SINGLE_GPU",
+        }
+        return out, mode, vae_policy
 
 
-class H3VMMasterLoader(_base.H3VMMasterLoader):
-    """Standalone cockpit stays integrated; external workflows should use H3VMCoreEngine."""
+class H3VMModeAwareVideoVAEDecode:
+    """MiniMax H3 Video VAE decoder controlled by the H3VM Core VAE policy."""
 
     @classmethod
     def INPUT_TYPES(cls):
-        spec = _base.H3VMMasterLoader.INPUT_TYPES()
-        spec = {k: dict(v) for k, v in spec.items()}
-        req = dict(spec["required"])
-        req["gpu_mode"] = (MASTER_GPU_MODES_RC5, {"default": "DUAL_QUIET｜双卡协同·日常推荐"})
-        spec["required"] = req
-        opt = dict(spec.get("optional", {}))
-        opt["style_lora_stack"] = ("H3VM_LORA_STACK",)
-        spec["optional"] = opt
-        return spec
+        import folder_paths
 
-    def load(self, unet_name, turbo_lora, lora_strength=1.0, gpu_mode="DUAL_QUIET",
-             capacity_vram_profile="SAFE｜保守·最稳", steps="4步｜极速", duration_seconds=15.0,
-             aspect_ratio="16:9", resolution="768P｜原生高清", custom_width=1344, custom_height=768,
-             seed=0, telemetry=True, prompt="", style_lora_stack=None):
-        from .h3vm.master_console import (
-            resolve_resolution, duration_to_length, resolve_steps, lora_family,
-            mode_summary, apply_sigma_shift, normalize_mode,
+        return {
+            "required": {
+                "ui_language": (UI_LANGUAGES, {"default": "中文"}),
+                "samples": ("LATENT",),
+                "vae": ("VAE",),
+                "mode": ("H3VM_MODE",),
+                "vae_policy": ("H3VM_VAE_POLICY",),
+                "vae_name": (
+                    folder_paths.get_filename_list("vae"),
+                    {
+                        "tooltip": "副卡加载的 Video VAE 文件。必须与连接到 vae 输入的 MiniMax H3 Video VAE 使用同一权重；H3VM 会在可验证时检查并拒绝明显不一致。",
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
+    FUNCTION = "decode"
+    CATEGORY = "MiniMaxH3/H3VM"
+    DESCRIPTION = (
+        "MiniMax H3 Video VAE 可选双卡加速。双卡开关由 H3VM Core 统一控制；"
+        "策略关闭或 Core 为单卡模式时直接使用原生单卡 VAE 解码。"
+        "双卡模式下 vae_name 必须与连接的主 VAE 使用同一权重。"
+    )
+
+    @staticmethod
+    def _native_decode(vae, samples):
+        latent = samples["samples"]
+        if getattr(latent, "is_nested", False):
+            latent = latent.unbind()[0]
+        images = vae.decode(latent)
+        if len(images.shape) == 5:
+            images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
+        return images
+
+    def decode(
+        self,
+        samples,
+        vae,
+        mode,
+        vae_policy,
+        vae_name,
+        ui_language="中文",
+    ):
+        del ui_language
+        mode_text = str(mode).strip()
+        policy = vae_policy if isinstance(vae_policy, dict) else {}
+        use_dual = bool(policy.get("dual_vae_enabled", False)) and not mode_text.startswith("SINGLE_GPU")
+        if not use_dual:
+            from .h3vm import runtime_active
+            if runtime_active():
+                from .h3vm.dual_video_vae import _cleanup_h3_runtime
+                _cleanup_h3_runtime()
+            return (self._native_decode(vae, samples),)
+
+        from .h3vm import activate_runtime
+        activate_runtime()
+        from .h3vm.dual_video_vae import dual_decode_h3_video
+
+        return (
+            dual_decode_h3_video(
+                vae=vae,
+                samples=samples,
+                vae_name=str(vae_name),
+                primary_device="gpu:0",
+                secondary_device="gpu:1",
+                cleanup_h3=True,
+                telemetry=True,
+                post_cleanup=True,
+            ),
         )
-        from .h3vm.style_lora import stack_summary
-        mode = normalize_mode(gpu_mode)
-        width, height = resolve_resolution(aspect_ratio, resolution, custom_width, custom_height)
-        length = duration_to_length(float(duration_seconds))
-        if mode == "DUAL_SYNC_ACCEL":
-            step_count = 20
-            note = "Mode4 standalone uses Stock H3 FullThrottle; Turbo and 4/6/8 preset ignored; ordinary Style LoRA remains enabled."
-            family = "STOCK_H3"
-        else:
-            step_count, note = resolve_steps(str(turbo_lora), str(steps))
-            family = lora_family(str(turbo_lora))
-        if note:
-            print(f"[H3VM MASTER] Turbo step note: {note}", flush=True)
-        if mode == "DUAL_CAPACITY" and int(step_count) < 8:
-            print("[H3VM MASTER] Capacity audio note: 8-step recommended; lower steps remain experimental.", flush=True)
-        print(
-            f"[H3VM MASTER] mode={mode_summary(mode)} | lora={turbo_lora} family={family} | steps={step_count} | "
-            f"duration={float(duration_seconds):.2f}s -> length={length} | canvas={width}x{height} | "
-            f"capacity_vram={capacity_vram_profile} | style_lora={stack_summary(style_lora_stack)}",
-            flush=True,
-        )
-        from .h3vm import core_adapter as _rc5_core  # noqa: F401
-        model = H3VMCapacityModeTurboLoader().load(
-            mode=mode, unet_name=str(unet_name), lora_name=str(turbo_lora), strength=float(lora_strength),
-            low_vram=False, primary_device="gpu:0", secondary_device="gpu:1",
-            capacity_vram_profile=str(capacity_vram_profile), capacity_mlp_chunk_rows=4096,
-            capacity_outproj_chunk_rows=4096, capacity_helper_heads=16,
-            capacity_attention_kernel="INT8_CURRENT", telemetry=bool(telemetry),
-            expected_steps=int(step_count), style_lora_stack=style_lora_stack,
-        )[0]
-        import comfy.samplers
-        if mode == "DUAL_SYNC_ACCEL":
-            sampler = comfy.samplers.sampler_object("res_multistep")
-            sampler_kind = "stock_res_multistep+20step(no_sigma_shift)"
-        else:
-            model = apply_sigma_shift(model, 12.0, 3.0)
-            if family.startswith("LIGHTX2V_"):
-                sampler = comfy.samplers.sampler_object("euler")
-                sampler_kind = "euler+ModelSamplingAV(12/3)"
-            else:
-                from .h3vm.turbo_compat import _load_larry_module
-                larry = _load_larry_module()
-                if not hasattr(larry, "_turbo_sampler"):
-                    raise RuntimeError("Installed ComfyUI-MiniMax-H3-Turbo lacks _turbo_sampler; please update it.")
-                sampler = comfy.samplers.KSAMPLER(larry._turbo_sampler)
-                sampler_kind = "larry_dual_clock(12/3)"
-        print(f"[H3VM MASTER] sampler={sampler_kind}", flush=True)
-        return model, mode, str(prompt), int(width), int(height), int(length), int(step_count), int(seed), sampler
 
 
-PUBLIC_NODE_CLASS_MAPPINGS = dict(_base.PUBLIC_NODE_CLASS_MAPPINGS)
-PUBLIC_NODE_CLASS_MAPPINGS.update({
-    "H3VMMasterLoader": H3VMMasterLoader,
+NODE_CLASS_MAPPINGS = {
     "H3VMCoreEngine": H3VMCoreEngine,
-    "H3VMStyleLoRAStack": H3VMStyleLoRAStack,
-})
-PUBLIC_NODE_DISPLAY_NAME_MAPPINGS = dict(_base.PUBLIC_NODE_DISPLAY_NAME_MAPPINGS)
-PUBLIC_NODE_DISPLAY_NAME_MAPPINGS.update({
-    "H3VMMasterLoader": "H3VM Multi-GPU Loader｜H3多卡加载器",
-    "H3VMCoreEngine": "H3VM Core｜多卡执行引擎",
-    "H3VMStyleLoRAStack": "H3VM Style LoRA Stack｜普通LoRA叠加",
-})
-LAB_NODE_CLASS_MAPPINGS = _base.LAB_NODE_CLASS_MAPPINGS
-LAB_NODE_DISPLAY_NAME_MAPPINGS = _base.LAB_NODE_DISPLAY_NAME_MAPPINGS
-NODE_CLASS_MAPPINGS = dict(PUBLIC_NODE_CLASS_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS = dict(PUBLIC_NODE_DISPLAY_NAME_MAPPINGS)
-if H3VM_SHOW_LAB_NODES:
-    NODE_CLASS_MAPPINGS.update(LAB_NODE_CLASS_MAPPINGS)
-    NODE_DISPLAY_NAME_MAPPINGS.update(LAB_NODE_DISPLAY_NAME_MAPPINGS)
+    "H3VMModeAwareVideoVAEDecode": H3VMModeAwareVideoVAEDecode,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "H3VMCoreEngine": "H3VM Core｜模型执行引擎",
+    "H3VMModeAwareVideoVAEDecode": "H3VM Video VAE｜双卡加速解码",
+}
 
-print("[H3VM v0.20.0-rc6] Master Loader + public MODEL->MODEL Core + Windows multi-GPU compatibility guard ready", flush=True)
+print(
+    f"[ComfyUI-H3-VRAM-Master {H3VM_VERSION}] focused plugin ready | runtime lazy | Core + optional Dual Video VAE",
+    flush=True,
+)
