@@ -33,6 +33,8 @@ def activate_runtime() -> bool:
             install_comfy_kitchen_multigpu_dlpack_guard()
             from .v0211_mode4 import install_snapshot_runtime_patch
             install_snapshot_runtime_patch()
+            from .v0211_vae_guard import install_dual_vae_identity_guard
+            install_dual_vae_identity_guard()
             _RUNTIME_ACTIVE = True
             print("[H3VM] v0.21.1 runtime activated lazily | standard workflows untouched", flush=True)
             return True

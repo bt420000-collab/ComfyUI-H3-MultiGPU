@@ -92,7 +92,7 @@ H3VM Core
 
 ## Video VAE
 
-需要双卡 Video VAE 时，把 H3VM Video VAE 接到原解码位置，并选择与主 VAE **同一套 MiniMax H3 Video VAE 权重**。
+需要双卡 Video VAE 时，把 H3VM Video VAE 接到原解码位置，并选择与主 VAE **同一套 MiniMax H3 Video VAE 权重**。v0.21.1 会在可验证时做轻量权重签名检查，明显选错 VAE 会直接拒绝。
 
 双卡性能差距很大时，可以关闭 Core 中的“双卡 VAE 加速”，主模型仍可继续使用 H3VM 双卡模式。
 
@@ -101,14 +101,12 @@ H3VM Core
 - Mode4 采样边界改由 ComfyUI `OUTER_SAMPLE` 生命周期管理，Steps Hint 不再承担运行结束判定；
 - Predictor 首拍 timestep 初始化更干净，减少无意义坐标历史重置；
 - 双卡 Video VAE 增加同源权重校验；
-- 参考工作流统一为标准 **20 Steps / Hint 20**；
+- 正式发布参考工作流统一为标准 **20 Steps / Hint 20**；
 - 保留并合并新版 ComfyUI 下的多 GPU 可见性与异构显卡预检修复。
 
 ## 参考工作流
 
-见：
-
-`example_workflows/01_H3VM_Core_Reference_Workflow.json`
+正式 **Release ZIP** 内附 `01_H3VM_Core_Reference_Workflow.json`。源码仓库保持精简，不再保留旧版 Quiet / Capacity 示例工作流。
 
 ## 当前兼容基线
 
