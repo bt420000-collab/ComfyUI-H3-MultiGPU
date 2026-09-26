@@ -9,6 +9,14 @@ H3VM is a VRAM and multi-GPU execution engine for local **MiniMax H3** generatio
 
 v0.21.1 focuses on a smaller public surface, stronger isolation, newer ComfyUI compatibility, and more practical controls for heterogeneous GPU pairs.
 
+## 🧪 Predictor Zoo research: LAB-PZ1 / PZ2
+
+**[Download nine-predictor LAB-PZ1 experimental release](https://github.com/bt420000-collab/ComfyUI-H3-MultiGPU/releases/tag/lab-pz1-v0.21.1)** · **[Full LAB-PZ1/PZ2 research report (Chinese)](H3VM_LAB_PZ1_PZ2_PREDICTOR_RESEARCH_2026-09.md)**
+
+On a dual RTX 5060 Ti 16 GB system, nine predictors were compared visually, then six predictors and one reference run were examined in PZ2 with sampled boundary-error measurements. Different predictors produced different generation trajectories; a large local feature error did not necessarily cause visible failure, while the QUADRATIC run exhibited substantial amplitude growth and visual artifacts. These preliminary results **do not prove that error and perceived quality are independent, nor do they establish a further speedup**. The report separates observations, measured metrics, limitations, and practical H3VM development implications.
+
+LAB-PZ1 is an **experimental prerelease**, not the stable production build. The PZ2 one-click Shadow Probe and its raw run data are **not included** in the PZ1 release.
+
 ## v0.21.1 highlights
 
 ### Newer ComfyUI multi-GPU compatibility
