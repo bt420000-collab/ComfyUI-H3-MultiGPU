@@ -56,7 +56,10 @@ def cuda(call, *args):
 
 
 def mem_free_bytes() -> int:
-    return int(cuda(rt.cudaMemGetInfo)[0])
+    err, free_bytes, _total_bytes = rt.cudaMemGetInfo()
+    if err != rt.cudaError_t.cudaSuccess:
+        raise RuntimeError(f"cudaMemGetInfo failed: {err}")
+    return int(free_bytes)
 
 
 def copy_h2d(dst: int, src: int, size: int) -> None:
